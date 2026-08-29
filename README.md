@@ -402,6 +402,25 @@ decisions and is supposed to diverge.
 
 ---
 
+## Disclaimers
+
+**Not for beginners.** Everything here wraps `pacman` or `yay` and assumes you
+can read a PKGBUILD, know what a partial upgrade is, and can recover your own
+system if something goes wrong.
+
+**Not affiliated with Manjaro.** This is a personal project. Nothing about it
+is endorsed by, or represents, the Manjaro team — it uses Manjaro's own
+`manjaro-chrootbuild` as one of its tools, and that is the extent of the
+relationship. It does not make the AUR supported, by anyone.
+
+**AI disclosure.** Substantial parts of this code were written with an AI
+assistant (Anthropic's Claude), used as a tool under the author's direction:
+every line is reviewed and tested, and responsibility for all of it is the
+author's. That involvement is recorded openly in the commit history
+(`Co-Authored-By` trailers). The CI suite — real pacman transactions against
+throwaway loop devices — exists precisely so that correctness never rests on
+anyone's word, the author's or a model's.
+
 ## Contributing
 
 Serious bugs only — see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go
