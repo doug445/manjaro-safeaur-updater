@@ -116,6 +116,10 @@ pacman "${PACMAN_ARGS[@]}" "${TO_REMOVE[@]}"
 # Overridable so the loopback suite can exercise the IgnorePkg rewrite
 # against a throwaway pacman root instead of the real /etc.
 PACMAN_CONF="${SAFEUP_PACMAN_CONF:-/etc/pacman.conf}"
+# Where this system keeps its UKIs. Overridable for the same reason
+# PACMAN_CONF is: the loopback suite has to be able to exercise BOTH the
+# present and the absent case regardless of what the host happens to have.
+UKI_DIR="${SAFEUP_UKI_DIR:-/boot/efi/Linux}"
 NEW_IGNORE=()
 for k in "${REMAINING[@]}"; do
     NEW_IGNORE+=("$k" "$k-headers" "$k-nvidia")
@@ -146,7 +150,7 @@ pacman -Qq "$KERNEL" 2>/dev/null && echo "  WARNING: $KERNEL still installed" ||
 echo
 echo "2) UKI gone (should not exist):"
 found_uki=0
-for f in /boot/efi/Linux/manjaro-*.efi; do
+for f in "$UKI_DIR"/manjaro-*.efi; do
     [[ -e "$f" ]] || continue          # unmatched glob stays literal
     [[ "$f" == *RESCUE* ]] && continue # the rescue image is meant to persist
     echo "  $f"; found_uki=1
@@ -159,7 +163,13 @@ echo
 echo "4) DKMS state:"
 dkms status 2>/dev/null | grep -E "^\S+/\S+, .*$" || echo "  (dkms not configured or no modules)"
 echo
-echo "5) Boot entries (systemd-boot will autodiscover from /boot/efi/Linux/):"
-ls /boot/efi/Linux/ 2>/dev/null
+echo "5) Boot entries (systemd-boot autodiscovers UKIs from $UKI_DIR):"
+# Guarded, like every other probe in this section. `2>/dev/null` hides the
+# message but NOT the exit status: ls returns 2 for a missing directory, and
+# under `set -e` that killed the script here -- after the removal and the
+# IgnorePkg rewrite had both already succeeded. The tool did the whole job
+# and then reported failure, on every system whose ESP is not mounted at
+# /boot/efi with a Linux/ in it.
+ls "$UKI_DIR"/ 2>/dev/null || echo "  (no $UKI_DIR — not a UKI/systemd-boot layout)"
 echo
 echo "[remove] done. Reboot is not required — running kernel ($RUNNING) is unaffected."

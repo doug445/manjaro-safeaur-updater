@@ -1,6 +1,6 @@
 # Contributing
 
-**Manjaro SafeAUR Updater 1.0.0**
+**Manjaro SafeAUR Updater 1.1.0**
 
 This project gates what gets installed on your machine. Every added code path is
 a path that can wave something through, and there is one maintainer to be sure
@@ -56,7 +56,7 @@ Run what CI runs:
 ```bash
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 bash tests/pin-fixture-test.sh            # expect 22 passed, 0 failed
-sudo bash tests/loopback-core-test.sh     # expect 26 passed, 0 failed
+sudo bash tests/loopback-core-test.sh     # expect 27 passed, 0 failed
 ```
 
 Requirements for any patch:

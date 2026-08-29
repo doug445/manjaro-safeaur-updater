@@ -69,7 +69,11 @@
 #   15. it REFUSES to remove the currently-booted kernel
 #   16. it REFUSES to remove the last remaining versioned kernel
 #   17. a legitimate removal takes the kernel, its headers and its -nvidia
-#       sibling, and rewrites IgnorePkg to name only the survivors
+#       sibling, and rewrites IgnorePkg to name only the survivors -- and
+#       still exits 0 when this system has no UKI directory at all, because
+#       the post-removal probes run after the work is already done and must
+#       never turn a completed removal into a failure exit
+#   18. ...and still exits 0, and still lists the images, when it does
 #
 # Run as root:  sudo bash tests/loopback-core-test.sh
 # Requires: pacman, repo-add, bsdtar (libarchive), losetup, mkfs.ext4, cc.
@@ -408,7 +412,7 @@ fi
 
 # =============================================================================
 echo ""
-echo "== 13-17. remove-versioned-kernel guards =="
+echo "== 13-18. remove-versioned-kernel guards =="
 # =============================================================================
 mkenv kernels
 remove-versioned-kernel --noconfirm not-a-kernel >/dev/null 2>&1
@@ -461,10 +465,23 @@ else
 fi
 
 # A legitimate removal, with an IgnorePkg line to rewrite.
-pacman -U --noconfirm "$(mkpkg linux66 6.6.1-3)" "$(mkpkg linux66-headers 6.6.1-3)" \
-    "$(mkpkg linux66-nvidia 6.6.1-3)" >/dev/null 2>&1
-sed -i 's|^IgnorePkg    =.*|IgnorePkg = linux66 linux66-headers linux66-nvidia linux99 linux99-headers linux99-nvidia nvidia-utils lib32-nvidia-utils|' "$CONF"
-out=$(remove-versioned-kernel --noconfirm linux66 2>&1); rc=$?
+#
+# SAFEUP_UKI_DIR is pointed at a path that does NOT exist, deliberately. The
+# verification section's probes run after the removal and the IgnorePkg
+# rewrite have already succeeded, so a probe that aborts the script there
+# turns a completed job into a non-zero exit -- and the machines where that
+# happens are exactly the ones whose ESP is not laid out like the author's.
+# Pinning the variable makes this case reproducible on every host instead of
+# only on the ones that happen to lack the directory.
+install_kernel_set() {
+    pacman -U --noconfirm "$(mkpkg linux66 "$1")" "$(mkpkg linux66-headers "$1")" \
+        "$(mkpkg linux66-nvidia "$1")" >/dev/null 2>&1
+    sed -i 's|^IgnorePkg.*|IgnorePkg = linux66 linux66-headers linux66-nvidia linux99 linux99-headers linux99-nvidia nvidia-utils lib32-nvidia-utils|' "$CONF"
+}
+
+install_kernel_set 6.6.1-3
+out=$(SAFEUP_UKI_DIR="$ENV_DIR/no-such-uki-dir" \
+      remove-versioned-kernel --noconfirm linux66 2>&1); rc=$?
 if [ "$rc" = "0" ] && ! pacman -Qq linux66 >/dev/null 2>&1 \
    && ! pacman -Qq linux66-headers >/dev/null 2>&1 \
    && ! pacman -Qq linux66-nvidia >/dev/null 2>&1; then
@@ -478,6 +495,18 @@ if ! grep -q 'linux66' <<<"$ign" && grep -q 'linux99' <<<"$ign" \
     pass "IgnorePkg rewritten to the survivors, nvidia userspace kept"
 else
     fail "IgnorePkg rewrite wrong: $ign"
+fi
+
+# 18. The same removal on a system that DOES have a UKI directory. Guarding a
+# probe is only correct if the guard did not also swallow the working case.
+UKI="$ENV_DIR/uki"; mkdir -p "$UKI"
+: > "$UKI/manjaro-linux99.efi"
+install_kernel_set 6.6.1-4
+out=$(SAFEUP_UKI_DIR="$UKI" remove-versioned-kernel --noconfirm linux66 2>&1); rc=$?
+if [ "$rc" = "0" ] && grep -q 'manjaro-linux99.efi' <<<"$out"; then
+    pass "removal exits 0 and still lists the UKIs when the directory exists"
+else
+    fail "UKI-present path broken (rc=$rc): $(grep -i 'boot entries' -A2 <<<"$out" | tr '\n' ' ')"
 fi
 
 echo ""

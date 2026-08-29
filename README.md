@@ -3,7 +3,7 @@
 [![lint](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell: bash](https://img.shields.io/badge/shell-bash-4EAA25.svg)](#requirements)
-[![Tests: 48](https://img.shields.io/badge/tests-48%20passing-brightgreen.svg)](#testing)
+[![Tests: 49](https://img.shields.io/badge/tests-49%20passing-brightgreen.svg)](#testing)
 [![No runtime deps](https://img.shields.io/badge/runtime%20deps-pacman%20%2B%20coreutils-lightgrey.svg)](#requirements)
 
 **Use the AUR on Manjaro without breaking your system.** A small suite of
@@ -14,7 +14,7 @@ package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed.
 
 It is five short bash scripts, no daemon, no runtime dependency beyond pacman
-and coreutils, and 48 tests that run real `pacman` transactions on a loop
+and coreutils, and 49 tests that run real `pacman` transactions on a loop
 device.
 
 ---
@@ -195,11 +195,11 @@ packages installed by that package manager.
 
 ## Testing
 
-Two suites, 48 assertions, both run in CI on every push.
+Two suites, 49 assertions, both run in CI on every push.
 
 ```bash
 bash tests/pin-fixture-test.sh          # 22 assertions — no root, no disk, no network
-sudo bash tests/loopback-core-test.sh   # 26 assertions — root; touches no real disk
+sudo bash tests/loopback-core-test.sh   # 27 assertions — root; touches no real disk
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 ```
 

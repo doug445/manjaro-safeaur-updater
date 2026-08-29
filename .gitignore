@@ -14,3 +14,7 @@ tests/*.out
 
 # Agent scratch specs — the design notes that matter live in docs/
 docs/superpowers/
+
+# Local one-shot repo bootstrap — not published
+setup-github.sh
+PASTE-SHEET.txt
