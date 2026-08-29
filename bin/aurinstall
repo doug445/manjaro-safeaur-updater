@@ -19,8 +19,9 @@
 # why -- in the three cases where the chroot is the wrong tool:
 #
 #   * manjaro-chrootbuild is not installed
-#   * the package depends on other AUR packages, which chrootbuild cannot
-#     resolve and yay can
+#   * the dependency chain cannot be resolved — a cycle, a member missing
+#     from the AUR (dead source), or deeper than AURINSTALL_MAX_CHAIN.
+#     Resolvable chains are BUILT, deps first, in one chrootbuild run.
 #   * the package is a *-bin. Nothing is compiled, so a chroot cannot change
 #     what ends up installed. It would still isolate the PKGBUILD's own
 #     execution, which is a real if smaller benefit -- the trade is that
@@ -57,20 +58,16 @@
 #      still exits 0, and silently produces exactly the mismatch you were
 #      trying to avoid. We always pass an explicit branch, detected from
 #      `pacman-mirrors --get-branch`.
-#   2. chrootbuild has no AUR dependency resolution. A package whose deps
-#      are themselves in the AUR fails partway through, after the chroot
-#      work. We detect that from .SRCINFO first and refuse up front.
-#
-#      Chaining builds in dependency order (-i each dep into the chroot)
-#      was considered and rejected. The ordering itself is a topological
-#      sort over .SRCINFO and is the easy half; the real blocker, confirmed
-#      by linux-aarhus's own experiments with the flightgear chain, is that
-#      mid-chain sources can simply be gone (his qt6-tools: "source does
-#      not exist") -- and no build order fixes an absent source. That is
-#      the same failure class aur-pin-check already triages: AUR cgit
-#      serves deleted packages' repos forever, so a chain can reference
-#      something that looks present and is years dead. Refusing and
-#      handing the chain to yay is the honest behaviour.
+#   2. chrootbuild has no dependency resolver, but it can build a CHAIN when
+#      handed the order: `-p dep -n -p target` (-n installs each built pkg
+#      into the chroot; thanks to linux-aarhus for the form). aurinstall
+#      computes that order itself — a depth-first walk over .SRCINFO, deps
+#      before dependents, cycle-checked, capped at AURINSTALL_MAX_CHAIN (10).
+#      Every chained dep gets pin-checked exactly like a named target.
+#      A chain member whose .SRCINFO cannot be fetched fails the WHOLE chain
+#      up front — the qt6-tools class from linux-aarhus's flightgear
+#      experiment ("source does not exist"); no build order fixes an absent
+#      source, and that chain goes to yay instead.
 #
 # A chroot is build isolation, not a security boundary. The build still
 # runs upstream's build system; this reduces blast radius and fixes which
@@ -137,24 +134,63 @@ mp_conf_value() {
     return 1
 }
 
-# chrootbuild cannot resolve AUR dependencies. Find that out from .SRCINFO
-# before spending a chroot build on it, not halfway through one.
-aur_deps_of() {
-    local pkg="$1" url srcinfo dep name missing=()
-    printf -v url "$AUR_BASE" "$pkg"
-    srcinfo=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) || return 0
+fetch_srcinfo() { # $1 = pkg; prints .SRCINFO or fails
+    local url
+    printf -v url "$AUR_BASE" "$1"
+    curl -fsSL --max-time 15 "$url" 2>/dev/null
+}
+
+# --- dependency chain resolution --------------------------------------------
+# chrootbuild has no dependency resolver of its own, but it CAN build a chain
+# when handed the right order: `-p dep -n -p target` builds dep, installs it
+# into the chroot (-n), then builds target against it. (Thanks to
+# linux-aarhus for the -n form; -i is for installing REPO packages into the
+# chroot, not built ones.) The order is ours to compute: a depth-first walk
+# over .SRCINFO, deps emitted before dependents.
+#
+# A dependency satisfiable from a repo is left to the chroot's own pacman. A
+# dependency that is neither in a repo nor in the AUR index -- or whose
+# .SRCINFO cannot be fetched -- fails the WHOLE chain up front: that is the
+# qt6-tools class from linux-aarhus's flightgear experiment ("source does not
+# exist"), and no build order fixes an absent source. Note a dep merely
+# *installed on the host* does not count as satisfied here: the chroot cannot
+# see the host's packages, so a foreign installed dep joins the chain and gets
+# rebuilt.
+#
+# CHAIN accumulates across all requested packages (deps first); CHAIN_MARK
+# doubles as the cycle detector (1 = in progress, 2 = done).
+declare -A CHAIN_MARK=()
+CHAIN=()
+CHAIN_FAIL=""
+MAX_CHAIN="${AURINSTALL_MAX_CHAIN:-10}"
+
+resolve_chain() {
+    local pkg="$1" srcinfo dep name
+    case "${CHAIN_MARK[$pkg]:-}" in
+        2) return 0 ;;
+        1) CHAIN_FAIL="dependency cycle involving $pkg"; return 1 ;;
+    esac
+    CHAIN_MARK[$pkg]=1
+    if ! srcinfo=$(fetch_srcinfo "$pkg") || [[ -z "$srcinfo" ]]; then
+        CHAIN_FAIL="$pkg: .SRCINFO not fetchable — not in the AUR, or a dead source (no build order fixes an absent source)"
+        return 1
+    fi
     while IFS= read -r dep; do
         # strip any version constraint: foo>=1.2 -> foo
         name="${dep%%[<>=]*}"
         [[ -z "$name" ]] && continue
-        # satisfied by a repo package, an installed package, or a provider?
+        # a repo (or repo-provider) package: the chroot's pacman handles it
         pacman -Si "$name"  >/dev/null 2>&1 && continue
-        pacman -Qq "$name"  >/dev/null 2>&1 && continue
         pacman -Ssq "^${name}$" >/dev/null 2>&1 && continue
-        missing+=("$name")
+        resolve_chain "$name" || return 1
     done < <(/usr/bin/awk -F' = ' '
         /^[[:space:]]*(depends|makedepends|checkdepends) *=/ {print $2}' <<<"$srcinfo")
-    (( ${#missing[@]} )) && printf '%s\n' "${missing[@]}"
+    CHAIN_MARK[$pkg]=2
+    CHAIN+=("$pkg")
+    if (( ${#CHAIN[@]} > MAX_CHAIN )); then
+        CHAIN_FAIL="dependency chain exceeds $MAX_CHAIN packages (AURINSTALL_MAX_CHAIN raises it)"
+        return 1
+    fi
     return 0
 }
 
@@ -163,27 +199,30 @@ aur_deps_of() {
 # human-readable reason when it is not, and returns non-zero. Every rejection
 # is reported: a fallback that happens quietly is indistinguishable, from the
 # outside, from the tool doing what you assumed it did.
+# NOT called via $(...): the gate populates the global CHAIN array, and a
+# command substitution would build it in a subshell and throw it away. The
+# reason travels through GATE_REASON instead.
+GATE_REASON=""
 chroot_gate() {
-    local pkg deps
+    local pkg
 
     command -v chrootbuild >/dev/null 2>&1 \
-        || { echo "manjaro-chrootbuild is not installed (pacman -S manjaro-chrootbuild)"; return 1; }
+        || { GATE_REASON="manjaro-chrootbuild is not installed (pacman -S manjaro-chrootbuild)"; return 1; }
     command -v git >/dev/null 2>&1 \
-        || { echo "git is not installed"; return 1; }
+        || { GATE_REASON="git is not installed"; return 1; }
     command -v pacman-mirrors >/dev/null 2>&1 || [[ -n "${AURINSTALL_BRANCH:-}" ]] \
-        || { echo "cannot detect the Manjaro branch (no pacman-mirrors; set AURINSTALL_BRANCH)"; return 1; }
+        || { GATE_REASON="cannot detect the Manjaro branch (no pacman-mirrors; set AURINSTALL_BRANCH)"; return 1; }
 
     for pkg in "${pkgs[@]}"; do
         # A -bin package ships a prebuilt binary. Nothing is compiled, so a
         # clean chroot cannot change the shipped ELF -- it would cost a chroot
         # sync to achieve nothing.
         if [[ "$pkg" == *-bin ]]; then
-            echo "$pkg is a -bin package: nothing is compiled, so a chroot cannot change what gets installed (--chroot forces it anyway)"
+            GATE_REASON="$pkg is a -bin package: nothing is compiled, so a chroot cannot change what gets installed (--chroot forces it anyway)"
             return 1
         fi
-        mapfile -t deps < <(aur_deps_of "$pkg")
-        if (( ${#deps[@]} > 0 )); then
-            echo "$pkg needs AUR dependencies chrootbuild cannot resolve: ${deps[*]}"
+        if ! resolve_chain "$pkg"; then
+            GATE_REASON="cannot chain-build $pkg: $CHAIN_FAIL"
             return 1
         fi
     done
@@ -191,15 +230,15 @@ chroot_gate() {
 }
 
 if [[ "$mode" != yay ]]; then
-    if gate_reason=$(chroot_gate); then
+    if chroot_gate; then
         mode=chroot
     else
         if (( forced )); then
             # --chroot was explicit. Refusing is right; silently doing
             # something else would not be.
-            die "--chroot cannot be used here: $gate_reason"
+            die "--chroot cannot be used here: $GATE_REASON"
         fi
-        msg "using yay: $gate_reason"
+        msg "using yay: $GATE_REASON"
         mode=yay
     fi
 fi
@@ -220,39 +259,69 @@ if [[ -z "$branch" ]]; then
 fi
 [[ -n "$branch" ]] || die "empty branch; set AURINSTALL_BRANCH explicitly"
 
-pkgdest=$(mp_conf_value PKGDEST) || pkgdest="$PWD"
-[[ -d "$pkgdest" ]] || die "PKGDEST '$pkgdest' does not exist"
-
-msg "branch: $branch   chroot: /var/lib/chrootbuild   PKGDEST: $pkgdest"
-
 workdir=$(mktemp -d -t aurinstall-chroot.XXXXXX) || die "mktemp failed"
 # shellcheck disable=SC2064
 trap "rm -rf '$workdir'" EXIT
 
-built=()
-for pkg in "${pkgs[@]}"; do
-    msg ""
-    msg "=== $pkg ==="
+# With PKGDEST unset, makepkg drops the package next to the PKGBUILD and
+# chrootbuild surfaces it in the PARENT of the cloned directory — which is
+# $workdir here, not the directory aurinstall was invoked from. (Confirmed by
+# linux-aarhus; an earlier version of this fallback wrongly used $PWD and
+# would have reported "no package produced" on any system without PKGDEST.)
+# Note `PKGDEST=x sudo chrootbuild` does NOT work: sudo strips it, and
+# chrootbuild reads makepkg.conf — which is exactly what we read here.
+pkgdest=$(mp_conf_value PKGDEST) || pkgdest="$workdir"
+[[ -d "$pkgdest" ]] || die "PKGDEST '$pkgdest' does not exist"
+
+# The chain was resolved by the gate: dependencies first, targets last. Extra
+# members pulled in as dependencies were never pin-checked (only the command
+# line was), and an unvetted dep is the same supply-chain hole as an unvetted
+# target — gate them too before anything is cloned.
+chain_extra=()
+for pkg in "${CHAIN[@]}"; do
+    seen=0
+    for t in "${pkgs[@]}"; do [[ "$t" == "$pkg" ]] && { seen=1; break; }; done
+    (( seen )) || chain_extra+=("$pkg")
+done
+if (( ${#chain_extra[@]} > 0 )); then
+    msg "chain pulls in: ${chain_extra[*]} — pin-checking those too"
+    if ! aur-pin-check "${chain_extra[@]}"; then
+        die "a chained dependency failed the pin check — nothing was built"
+    fi
+fi
+
+msg "branch: $branch   chroot: /var/lib/chrootbuild   PKGDEST: $pkgdest"
+msg "build order: ${CHAIN[*]}"
+
+for pkg in "${CHAIN[@]}"; do
     git clone --quiet "${AUR_GIT_BASE}/${pkg}.git" "$workdir/$pkg" \
         || die "could not clone $pkg from the AUR"
-
-    # Snapshot PKGDEST so we can tell exactly which files this build produced,
-    # rather than guessing the artifact name from pkgver/pkgrel/arch.
-    before=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
-
-    cb_args=(-p "$pkg" -b "$branch")
-    (( clean )) && cb_args=(-c "${cb_args[@]}")
-    msg "running: sudo chrootbuild ${cb_args[*]}"
-    ( cd "$workdir" && sudo chrootbuild "${cb_args[@]}" ) || die "chrootbuild failed for $pkg"
-
-    after=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
-    mapfile -t new < <(comm -13 <(echo "$before") <(echo "$after"))
-    if (( ${#new[@]} == 0 )); then
-        die "chrootbuild reported success but produced no package in $pkgdest"
-    fi
-    msg "built: ${new[*]##*/}"
-    built+=("${new[@]}")
 done
+
+# One chrootbuild invocation for the whole chain. -n after each non-final
+# package installs the freshly built artifact into the chroot, so the next
+# build in the chain can depend on it:  -p dep2 -n -p dep1 -n -p target
+cb_args=()
+(( clean )) && cb_args+=(-c)
+last=$(( ${#CHAIN[@]} - 1 ))
+for i in "${!CHAIN[@]}"; do
+    cb_args+=(-p "${CHAIN[$i]}")
+    (( i < last )) && cb_args+=(-n)
+done
+cb_args+=(-b "$branch")
+
+# Snapshot PKGDEST so we can tell exactly which files this run produced,
+# rather than guessing artifact names from pkgver/pkgrel/arch.
+before=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
+
+msg "running: sudo chrootbuild ${cb_args[*]}"
+( cd "$workdir" && sudo chrootbuild "${cb_args[@]}" ) || die "chrootbuild failed"
+
+after=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
+mapfile -t built < <(comm -13 <(echo "$before") <(echo "$after"))
+if (( ${#built[@]} == 0 )); then
+    die "chrootbuild reported success but produced no package in $pkgdest"
+fi
 
 echo "" >&2
 msg "${#built[@]} package(s) built against branch '$branch':"

@@ -3,7 +3,7 @@
 [![lint](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell: bash](https://img.shields.io/badge/shell-bash-4EAA25.svg)](#requirements)
-[![Tests: 62](https://img.shields.io/badge/tests-62%20passing-brightgreen.svg)](#testing)
+[![Tests: 65](https://img.shields.io/badge/tests-65%20passing-brightgreen.svg)](#testing)
 [![No runtime deps](https://img.shields.io/badge/runtime%20deps-pacman%20%2B%20coreutils-lightgrey.svg)](#requirements)
 
 **Use the AUR on Manjaro without breaking your system.** A small suite of
@@ -14,7 +14,7 @@ package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed.
 
 It is five short bash scripts, no daemon, no runtime dependency beyond pacman
-and coreutils, and 62 tests that run real `pacman` transactions on a loop
+and coreutils, and 65 tests that run real `pacman` transactions on a loop
 device.
 
 ---
@@ -225,8 +225,15 @@ first, and falls back to `yay` — always saying which one tripped — rather th
 failing:
 
 - `manjaro-chrootbuild` is not installed.
-- The package depends on other AUR packages. `chrootbuild` cannot resolve
-  those; `yay` can.
+- The dependency chain cannot be resolved — a member is missing from the AUR
+  (a dead source: no build order fixes that), there is a cycle, or the chain is
+  deeper than `AURINSTALL_MAX_CHAIN` (10). **Resolvable chains are built**, deps
+  first, as one `chrootbuild` run chained with `-n`
+  (`-p dep2 -n -p dep1 -n -p target`), and every chained dependency is
+  pin-checked exactly like a named target — an unvetted dep is the same
+  supply-chain hole as an unvetted target. The `-n` form is due to
+  linux-aarhus, whose flightgear experiments also supplied the failure case
+  the resolver refuses on.
 - The package is a `*-bin`. Nothing is compiled, so a chroot cannot change what
   gets installed. It *would* still isolate the PKGBUILD's own execution — a
   real if smaller benefit — so `--chroot` forces it anyway if you want that.
@@ -333,10 +340,10 @@ packages installed by that package manager.
 
 ## Testing
 
-Two suites, 62 assertions, both run in CI on every push.
+Two suites, 65 assertions, both run in CI on every push.
 
 ```bash
-bash tests/pin-fixture-test.sh          # 31 assertions — no root, no disk, no network
+bash tests/pin-fixture-test.sh          # 34 assertions — no root, no disk, no network
 sudo bash tests/loopback-core-test.sh   # 31 assertions — root; touches no real disk
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 ```

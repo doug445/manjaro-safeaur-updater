@@ -55,21 +55,25 @@
 #   18. aurupdate pin-checks the pending set and aborts on a failure
 #   19. --chroot still runs the pin-check gate first, and an unpinned package
 #       never reaches chrootbuild
-#   20. --chroot refuses a package whose dependencies are themselves in the
-#       AUR, BEFORE spending a chroot build on it -- chrootbuild has no AUR
-#       dependency resolution and would fail partway through
+#   20. --chroot refuses an UNRESOLVABLE chain (dep missing from the AUR)
+#       before spending a chroot build on it
 #   21. --chroot always passes an explicit -b <branch>; chrootbuild's default
 #       is 'unstable', and building against the wrong branch still exits 0
 #       while producing exactly the soname mismatch this suite exists to stop
 #   22. --chroot builds the package it was asked for
 #   23. auto mode (no flag) uses the chroot when the package is eligible
-#   24. auto mode falls back to yay when deps are in the AUR, and REPORTS why
+#   24. auto mode falls back to yay when the chain cannot resolve, REPORTING why
 #   25. auto mode sends *-bin to yay: nothing is compiled, so a chroot cannot
 #       change the shipped ELF and would only cost a chroot sync
 #   26. an explicit --chroot on an ineligible package is an ERROR -- forcing a
 #       mode and then silently getting another one is the failure this suite
 #       exists to prevent
 #   27. --no-chroot forces yay even when the chroot would have worked
+#   28. a resolvable AUR dependency chain is BUILT, deps first, as one
+#       chrootbuild invocation chained with -n (-p dep2 -n -p dep1 -n -p tgt)
+#   29. a chained dependency is pin-checked exactly like a named target --
+#       an unvetted dep is the same supply-chain hole as an unvetted target
+#   30. a dependency cycle is detected and falls back to yay, naming it
 #
 # Run:  bash tests/pin-fixture-test.sh
 # Requires: bash >= 4, git, curl (with file:// support), awk, coreutils.
@@ -429,11 +433,11 @@ rpc needsaur 1
 mk_aur_repo needsaur
 : > "$WORK_CB_LOG"
 out=$(aurinstall --chroot needsaur 2>&1); rc=$?
-if (( rc == 2 )) && grep -q 'AUR dependencies chrootbuild cannot resolve' <<<"$out" \
-   && [[ ! -s "$WORK_CB_LOG" ]]; then
-    pass "--chroot refuses a package with AUR deps before spending a chroot build"
+if (( rc == 2 )) && grep -q 'cannot chain-build needsaur' <<<"$out" \
+   && grep -q 'not fetchable' <<<"$out" && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "--chroot refuses an unresolvable chain before spending a chroot build"
 else
-    fail "--chroot did not refuse unresolvable AUR deps (rc=$rc)"
+    fail "--chroot did not refuse an unresolvable chain (rc=$rc)"
 fi
 
 # 21. a clean package reaches chrootbuild WITH an explicit branch
@@ -472,8 +476,8 @@ rpc needsaur2 1; mk_aur_repo needsaur2
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
 out=$(aurinstall needsaur2 </dev/null 2>&1)
 if grep -q -- '-S needsaur2' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]] \
-   && grep -q 'using yay:' <<<"$out"; then
-    pass "auto mode falls back to yay on AUR deps, and reports the reason"
+   && grep -q 'using yay: cannot chain-build' <<<"$out"; then
+    pass "auto mode falls back to yay on an unresolvable chain, reporting why"
 else
     fail "auto fallback wrong (yay='$(cat "$WORK_YAY_LOG")', said: $(grep -c 'using yay' <<<"$out"))"
 fi
@@ -507,6 +511,47 @@ if grep -q -- '-S cleanpkg' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]]; then
     pass "--no-chroot forces yay even for a chroot-eligible package"
 else
     fail "--no-chroot did not force yay"
+fi
+
+# --- dependency chains (28-30) -----------------------------------------------
+# target -> dep1 -> dep2, none in any repo. The resolver must emit deps first
+# and hand chrootbuild ONE invocation: -p dep2 -n -p dep1 -n -p target.
+srcinfo chdep2  "https://example.invalid/d2.tar.gz"
+srcinfo chdep1  "https://example.invalid/d1.tar.gz"
+printf '\tdepends = chdep2\n' >> "$WORK/srcinfo/chdep1.SRCINFO"
+srcinfo chtarget "https://example.invalid/t.tar.gz"
+printf '\tdepends = chdep1\n' >> "$WORK/srcinfo/chtarget.SRCINFO"
+for pkg in chdep2 chdep1 chtarget; do rpc "$pkg" 1; mk_aur_repo "$pkg"; done
+
+# 28. build order computed and chained with -n, in one invocation
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(aurinstall chtarget </dev/null 2>&1)
+if grep -q -- '-p chdep2 -n -p chdep1 -n -p chtarget' "$WORK_CB_LOG"; then
+    pass "chain built deps-first in one run: -p chdep2 -n -p chdep1 -n -p chtarget"
+else
+    fail "chain order wrong: $(cat "$WORK_CB_LOG")"
+fi
+
+# 29. chained deps get pin-checked like named targets: poison the DEEPEST dep
+srcinfo chdep2 "git+https://example.invalid/evil.git"
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(aurinstall chtarget </dev/null 2>&1); rc=$?
+if (( rc == 2 )) && grep -q 'chained dependency failed the pin check' <<<"$out" \
+   && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "an unpinned CHAINED dependency stops the build — deps are gated too"
+else
+    fail "poisoned chained dep was not caught (rc=$rc)"
+fi
+srcinfo chdep2 "https://example.invalid/d2.tar.gz"   # restore
+
+# 30. a dependency cycle is refused with a named reason, not an infinite loop
+printf '\tdepends = chtarget\n' >> "$WORK/srcinfo/chdep2.SRCINFO"
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(timeout 30 aurinstall chtarget </dev/null 2>&1)
+if grep -q 'dependency cycle' <<<"$out" && grep -q -- '-S chtarget' "$WORK_YAY_LOG"; then
+    pass "a dependency cycle falls back to yay, naming the cycle"
+else
+    fail "cycle not handled: $(grep 'using yay' <<<"$out")"
 fi
 
 echo ""
