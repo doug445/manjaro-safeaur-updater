@@ -1,0 +1,72 @@
+name: Bug report
+description: A gate that passed when it should have failed, a wrong hold, or a silent success.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bug reports only — see [CONTRIBUTING.md](https://github.com/doug445/manjaro-safeaur-updater/blob/main/CONTRIBUTING.md).
+        **Security issues do not go here**; use the private address in
+        [SECURITY.md](https://github.com/doug445/manjaro-safeaur-updater/blob/main/SECURITY.md).
+
+        Before pasting logs, skim [SECURITY.md § Before you send diagnostics](https://github.com/doug445/manjaro-safeaur-updater/blob/main/SECURITY.md#before-you-send-diagnostics)
+        — `pacman.conf` and the allowlist say more about your machine than you may intend.
+
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool
+      options:
+        - safeup
+        - aur-pin-check
+        - aur-rebuild-check
+        - aurinstall
+        - aurupdate
+        - remove-versioned-kernel
+        - deploy.sh
+        - tests
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you ran, what you expected, what happened
+      description: The exact command line, verbatim.
+      placeholder: |
+        $ aurupdate
+        expected: refused, because <pkg> has an unpinned git source
+        happened: it built and installed
+    validations:
+      required: true
+
+  - type: textarea
+    id: repos
+    attributes:
+      label: Configured repositories
+      description: Output of `pacman-conf --repo-list`. Redact private or internal mirrors.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`git -C /path/to/manjaro-safeaur-updater describe --tags --always --dirty`"
+      placeholder: v1.0.0-3-gabc1234-dirty
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Terminal output and relevant /var/log/safeup.log lines
+      render: shell
+
+  - type: textarea
+    id: srcinfo
+    attributes:
+      label: "For a pin-check bug: the package's source lines"
+      description: "`curl -s \"https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=<pkg>\" | grep source`"
+      render: shell

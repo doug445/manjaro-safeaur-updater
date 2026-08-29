@@ -1,0 +1,14 @@
+[Unit]
+Description=Manjaro SafeAUR Updater source-of-record drift audit
+Documentation=https://github.com/doug445/manjaro-safeaur-updater
+# @@SUITE_DIR@@ is rewritten to the real checkout path by deploy.sh. The unit
+# is shipped as a template because the checkout can live anywhere.
+
+[Service]
+Type=oneshot
+ExecStart=@@SUITE_DIR@@/audit-drift.sh
+# Advisory only: drift is reported, never corrected. A failing audit must not
+# look like a failing system, so a non-zero exit is not an error here.
+SuccessExitStatus=0 1 2
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/doug445/manjaro-safeaur-updater/blob/main/SECURITY.md
+    about: Do not open a public issue. Report privately by email — see SECURITY.md.
+  - name: A package is being held and I want it anyway
+    url: https://github.com/doug445/manjaro-safeaur-updater/blob/main/README.md#what-this-does-not-do
+    about: A hold is usually the guard working. Read this before filing — the dependency genuinely is not satisfiable yet.
+  - name: What this project accepts
+    url: https://github.com/doug445/manjaro-safeaur-updater/blob/main/CONTRIBUTING.md
+    about: Bug reports only. Features, options and refactors are declined. Read before opening anything.
+  - name: Why #tag= sources are rejected
+    url: https://github.com/doug445/manjaro-safeaur-updater/blob/main/README.md#why-tag-is-rejected
+    about: Tags are mutable. The allowlist is the supported escape hatch, and it re-verifies on every run.

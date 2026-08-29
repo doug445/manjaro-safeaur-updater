@@ -1,0 +1,173 @@
+#!/bin/bash
+# aur-pin-check — refuse AUR packages whose PKGBUILD uses unpinned VCS sources.
+#
+# Pinning policy: every git/hg/svn/bzr source in the PKGBUILD must carry a
+# `#commit=<sha>` fragment (40-char hex). Tag fragments (`#tag=...`) are
+# REJECTED because upstream can re-point tags. Non-VCS sources are always
+# acceptable — their integrity is guaranteed by PKGBUILD's sha256sums.
+#
+# Reads .SRCINFO (post-eval, no bash execution) from AUR's cgit. Safe to
+# run on untrusted package names: only does an HTTPS fetch + text parse.
+#
+# Allowlist (escape hatch for tag-pinned upstreams):
+#   /etc/aur-pin-check/allowlist.conf — one rule per line:
+#     <pkg>  <vcs-source-spec>  <expected-40-hex-sha>
+#   When a tag-pinned source matches an allowlist rule, the upstream tag
+#   is resolved live with `git ls-remote` and accepted only if the SHA
+#   still matches the recorded value. If upstream silently moves the tag,
+#   the SHA changes and the package is rejected on the next run — TOFU
+#   semantics, no blanket trust.
+#
+# Usage:
+#   aur-pin-check pkg1 pkg2 ...
+#
+# On REJECT, prints triage hints before you reach for the override: whether
+# the package is still in the AUR index at all (cgit serves deleted packages'
+# repos forever), and whether it is an installed orphan that should simply be
+# removed rather than allowlisted.
+#
+# Exit: 0 all pinned (or no VCS sources), 1 any unpinned, 2 fetch/lookup err.
+
+set -uo pipefail
+
+ALLOWLIST="${AUR_PIN_ALLOWLIST:-/etc/aur-pin-check/allowlist.conf}"
+
+# Endpoints, as printf formats taking the package name. Overridable so the
+# fixture suite can point them at local files -- there is no other way to
+# exercise the parser and the TOFU logic without hitting the real AUR on
+# every test run. Nothing but tests should ever set these.
+AUR_SRCINFO_URL="${AUR_SRCINFO_URL:-https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=%s}"
+AUR_RPC_URL="${AUR_RPC_URL:-https://aur.archlinux.org/rpc/v5/info?arg%%5B%%5D=%s}"
+
+(( $# > 0 )) || { echo "usage: $0 <pkg>..." >&2; exit 2; }
+
+# Look up an allowlist rule. Echoes the expected SHA on stdout if a row
+# matches (pkg + exact source spec). No output if no match.
+allowlist_sha() {
+    local pkg="$1" spec="$2"
+    [[ -r "$ALLOWLIST" ]] || return 1
+    awk -v p="$pkg" -v s="$spec" '
+        /^[[:space:]]*#/ || NF < 3 { next }
+        $1 == p && $2 == s { print $3; exit }
+    ' "$ALLOWLIST"
+}
+
+# Resolve a `git+<url>#tag=<name>` source to its current upstream SHA.
+# Returns empty string on any failure.
+resolve_git_tag() {
+    local spec="$1" url tag
+    # Strip the git+ prefix and the #tag=... fragment to get the bare URL.
+    url="${spec#git+}"
+    tag="${url##*#tag=}"
+    url="${url%%#*}"
+    [[ -z "$tag" || "$tag" == "$spec" ]] && return 1
+    # ls-remote with an exact ref path; awk to extract the SHA.
+    git ls-remote --tags --refs "$url" "refs/tags/$tag" 2>/dev/null \
+        | awk 'NR==1 {print $1}'
+}
+
+# Is this package still present in the AUR RPC index?
+#
+# cgit serves the git repos of *deleted* packages indefinitely, so a
+# successful .SRCINFO fetch does NOT prove the package still exists. A
+# deleted package's PKGBUILD can be many years stale, which makes the
+# "override: yay -S <pkg>" advice actively dangerous (2026-08-28: `gh`
+# resolved to a 2020-02-06 repo pinning GitHub CLI 0.5.4).
+#
+# Returns: 0 indexed, 1 not indexed, 2 could not determine.
+in_aur_index() {
+    local pkg="$1" body
+    local rpc; printf -v rpc "$AUR_RPC_URL" "$pkg"
+    body=$(curl -fsSL --max-time 10 "$rpc" 2>/dev/null) || return 2
+    case "$body" in
+        *'"resultcount":0'*) return 1 ;;
+        *'"resultcount":'*)  return 0 ;;
+        *)                   return 2 ;;
+    esac
+}
+
+# Print triage hints after a REJECT, so the override isn't the obvious move.
+# Encodes the two ways a REJECT turns out not to need an allowlist row at all.
+reject_hints() {
+    local pkg="$1"
+
+    # (a) Package deleted from the AUR — look for a repo replacement instead.
+    in_aur_index "$pkg"
+    case $? in
+        1)
+            echo "[pin-check] NOTE  $pkg is NOT in the AUR index — deleted or renamed." >&2
+            echo "    cgit still serves deleted packages' repos, so the source above may be" >&2
+            echo "    years stale. Do NOT use the 'yay -S $pkg' override; find the real" >&2
+            echo "    package first:  pacman -Ss $pkg   |   pacman -F $pkg" >&2
+            ;;
+        2)
+            echo "[pin-check] NOTE  could not reach the AUR index to confirm $pkg still exists." >&2
+            ;;
+    esac
+
+    # (b) Installed but orphaned — removal beats a re-vet-forever allowlist row.
+    if pacman -Qq "$pkg" >/dev/null 2>&1 \
+       && pacman -Qdtq 2>/dev/null | grep -qxF -- "$pkg"; then
+        echo "[pin-check] NOTE  $pkg is an orphan (installed as a dep, now required by nothing)." >&2
+        echo "    Prefer 'pacman -Rns $pkg' over adding an allowlist row for it." >&2
+    fi
+}
+
+fail=0
+for pkg in "$@"; do
+    # Skip packages already in pacman repos — not AUR, not our concern.
+    if pacman -Si "$pkg" >/dev/null 2>&1; then
+        continue
+    fi
+
+    printf -v url "$AUR_SRCINFO_URL" "$pkg"
+    srcinfo=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) || {
+        echo "[pin-check] ERROR $pkg: cannot fetch .SRCINFO from AUR" >&2
+        fail=1
+        continue
+    }
+
+    # Extract source URLs. .SRCINFO format: "\tsource = <spec>"
+    unpinned=()
+    while IFS= read -r spec; do
+        # Strip optional "local-name::" prefix (e.g. pkgname.tar.gz::https://...)
+        url="${spec#*::}"
+        # Only examine VCS pseudo-URLs.
+        case "$url" in
+            git+*|git://*|hg+*|svn+*|bzr+*) ;;
+            *) continue ;;
+        esac
+        # Pinned iff fragment `#commit=<40-hex>` present.
+        if [[ "$url" =~ \#commit=[0-9a-fA-F]{40}([[:space:]]|$) ]]; then
+            continue
+        fi
+        # Allowlist: tag→SHA verification against recorded expected SHA.
+        expected_sha=$(allowlist_sha "$pkg" "$url")
+        if [[ -n "$expected_sha" ]]; then
+            actual_sha=$(resolve_git_tag "$url")
+            if [[ -z "$actual_sha" ]]; then
+                echo "[pin-check] REJECT $pkg: allowlisted source but tag did not resolve:" >&2
+                echo "    $url" >&2
+                fail=1
+            elif [[ "$actual_sha" != "$expected_sha" ]]; then
+                echo "[pin-check] REJECT $pkg: allowlisted tag moved upstream!" >&2
+                echo "    source:   $url" >&2
+                echo "    expected: $expected_sha" >&2
+                echo "    actual:   $actual_sha" >&2
+                echo "    if intentional, update $ALLOWLIST" >&2
+                fail=1
+            fi
+            continue
+        fi
+        unpinned+=("$url")
+    done < <(awk -F' = ' '/^[[:space:]]*source *=/ {print $2}' <<<"$srcinfo")
+
+    if (( ${#unpinned[@]} > 0 )); then
+        echo "[pin-check] REJECT $pkg: ${#unpinned[@]} unpinned VCS source(s):" >&2
+        printf '    %s\n' "${unpinned[@]}" >&2
+        reject_hints "$pkg"
+        fail=1
+    fi
+done
+
+exit "$fail"

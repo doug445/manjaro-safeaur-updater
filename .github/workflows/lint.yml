@@ -1,0 +1,60 @@
+name: lint
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax check (bash -n)
+        run: |
+          set -e
+          for f in $(git ls-files '*.sh') bin/*; do
+            bash -n "$f"
+            echo "syntax OK: $f"
+          done
+
+      - name: shellcheck (warning severity)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q shellcheck
+          shellcheck -S warning $(git ls-files '*.sh') bin/*
+
+  pin-fixtures:
+    # The supply-chain gate against synthetic .SRCINFO fixtures and real local
+    # git repositories. No root, no disk, no network — pure logic, so it runs
+    # anywhere and on both architectures.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: pin/allowlist fixture test
+        run: bash tests/pin-fixture-test.sh
+
+  loopback:
+    # Real pacman transactions against a throwaway package root on a
+    # file-backed loop device. No real disk and no real package database is
+    # touched. Runs in an Arch container because that is where a genuine
+    # pacman, repo-add and makepkg toolchain exists; --privileged is required
+    # for losetup inside the container.
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: install test dependencies
+        run: |
+          pacman -Sy --noconfirm --needed \
+            git gcc e2fsprogs util-linux libarchive pacman-contrib
+      - uses: actions/checkout@v4
+      - name: loopback core test
+        run: bash tests/loopback-core-test.sh

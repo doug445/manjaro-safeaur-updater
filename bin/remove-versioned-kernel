@@ -1,0 +1,165 @@
+#!/bin/bash
+# remove-versioned-kernel — fully evict a Manjaro versioned kernel.
+#
+# Removes <kernel>, <kernel>-headers, <kernel>-nvidia in one transaction.
+# The mkinitcpio remove hook (60-mkinitcpio-remove.hook) reads the kernel's
+# preset before deletion and removes the UKI from /boot/efi/Linux/.
+# systemd-boot autodiscovers UKIs via BLS Type #2, so the boot entry
+# disappears with the UKI file. DKMS hooks clean built modules.
+#
+# This script ALSO cleans the kernel's three entries from IgnorePkg in
+# /etc/pacman.conf (hook 90 only fires on Install, not Remove).
+#
+# Refuses to remove the currently-booted kernel or to leave the system
+# with zero versioned kernels.
+#
+# Usage: sudo remove-versioned-kernel [--noconfirm] <linuxNN>   # e.g. linux66
+#
+# --noconfirm skips the final y/N prompt. It does NOT skip the three safety
+# checks below — those are the actual guards and have no bypass.
+
+set -euo pipefail
+
+ASSUME_YES=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --noconfirm) ASSUME_YES=1 ;;
+        *)           ARGS+=("$a") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 [--noconfirm] <linuxNN>" >&2
+    echo "  e.g.: $0 linux66" >&2
+    exit 2
+fi
+
+KERNEL="$1"
+
+if [[ ! "$KERNEL" =~ ^linux[0-9]+$ ]]; then
+    echo "ERROR: '$KERNEL' is not a Manjaro versioned kernel name (expected linuxNN)" >&2
+    exit 2
+fi
+
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: must run as root (sudo)" >&2
+    exit 2
+fi
+
+# --- Safety check 1: is this kernel even installed? ---
+if ! pacman -Qq "$KERNEL" >/dev/null 2>&1; then
+    echo "[remove] '$KERNEL' is not installed — nothing to do" >&2
+    exit 0
+fi
+
+# --- Safety check 2: are we currently booted into it? ---
+RUNNING="$(uname -r)"
+# Map running kernel (e.g. 6.6.128-1-MANJARO) to its pkg by checking /usr/lib/modules ownership.
+RUNNING_PKG="$(pacman -Qoq "/usr/lib/modules/${RUNNING}" 2>/dev/null | head -1 || true)"
+if [[ "$RUNNING_PKG" == "$KERNEL" ]]; then
+    echo "ERROR: refusing to remove $KERNEL — you are currently booted into it ($RUNNING)" >&2
+    echo "       reboot into another kernel first, then re-run this script" >&2
+    exit 3
+fi
+
+# --- Safety check 3: would this leave 0 versioned kernels? ---
+mapfile -t INSTALLED_KERNELS < <(pacman -Qq | grep -E '^linux[0-9]+$')
+REMAINING=()
+for k in "${INSTALLED_KERNELS[@]}"; do
+    [[ "$k" != "$KERNEL" ]] && REMAINING+=("$k")
+done
+if (( ${#REMAINING[@]} == 0 )); then
+    echo "ERROR: refusing to remove $KERNEL — it would leave 0 versioned kernels installed" >&2
+    exit 3
+fi
+
+echo "[remove] currently booted: $RUNNING ($RUNNING_PKG)"
+echo "[remove] removing: $KERNEL + $KERNEL-headers + $KERNEL-nvidia"
+echo "[remove] kernels remaining after this: ${REMAINING[*]}"
+echo
+
+# --- Build the package list (only include what's actually installed) ---
+TO_REMOVE=()
+for p in "$KERNEL" "$KERNEL-headers" "$KERNEL-nvidia"; do
+    if pacman -Qq "$p" >/dev/null 2>&1; then
+        TO_REMOVE+=("$p")
+    else
+        echo "[remove] note: $p not installed, skipping"
+    fi
+done
+
+# --- Confirm ---
+if (( ASSUME_YES )); then
+    echo "[remove] --noconfirm: proceeding with pacman -Rns ${TO_REMOVE[*]}"
+else
+    read -r -p "[remove] proceed with pacman -Rns ${TO_REMOVE[*]}? [y/N] " ans </dev/tty
+    case "$ans" in
+        y|Y|yes|Yes) : ;;
+        *) echo "[remove] aborted by user"; exit 1 ;;
+    esac
+fi
+
+# --- Do the removal ---
+# -R: remove   -n: don't save .pacsave  -s: also remove unused deps
+# --noconfirm has to reach pacman too, or the flag only silences OUR prompt
+# and the run then blocks forever on pacman's own.
+PACMAN_ARGS=(-Rns)
+(( ASSUME_YES )) && PACMAN_ARGS+=(--noconfirm)
+pacman "${PACMAN_ARGS[@]}" "${TO_REMOVE[@]}"
+
+# --- Clean IgnorePkg ---
+# We rebuild the line from scratch using the surviving kernels + nvidia entries.
+# (Hook 90's sync script only emits linuxNN + linuxNN-headers — it doesn't know
+# about the -nvidia siblings or userspace nvidia-utils. Bypassing it on Remove.)
+# Overridable so the loopback suite can exercise the IgnorePkg rewrite
+# against a throwaway pacman root instead of the real /etc.
+PACMAN_CONF="${SAFEUP_PACMAN_CONF:-/etc/pacman.conf}"
+NEW_IGNORE=()
+for k in "${REMAINING[@]}"; do
+    NEW_IGNORE+=("$k" "$k-headers" "$k-nvidia")
+done
+# nvidia userspace must stay held in lockstep — see project_signed_kernel_pipeline.md
+NEW_IGNORE+=(nvidia-utils lib32-nvidia-utils)
+NEW_LINE="IgnorePkg = ${NEW_IGNORE[*]}"
+
+# Locate the existing IgnorePkg line and replace by line number.
+TARGET=$(grep -nE '^IgnorePkg = ' "$PACMAN_CONF" | head -1 | cut -d: -f1)
+if [[ -n "$TARGET" ]]; then
+    BACKUP="$PACMAN_CONF.bak-$(date +%Y%m%d-%H%M%S)"
+    cp "$PACMAN_CONF" "$BACKUP"
+    sed -i "${TARGET}c\\${NEW_LINE}" "$PACMAN_CONF"
+    echo
+    echo "[remove] updated IgnorePkg (line ${TARGET}). Backup: $BACKUP"
+    grep -nE '^IgnorePkg' "$PACMAN_CONF"
+else
+    echo "[remove] WARNING: no IgnorePkg line found in $PACMAN_CONF — leaving as-is"
+fi
+
+# --- Verify state ---
+echo
+echo "=== verification ==="
+echo
+echo "1) Package gone:"
+pacman -Qq "$KERNEL" 2>/dev/null && echo "  WARNING: $KERNEL still installed" || echo "  ok: $KERNEL not installed"
+echo
+echo "2) UKI gone (should not exist):"
+found_uki=0
+for f in /boot/efi/Linux/manjaro-*.efi; do
+    [[ -e "$f" ]] || continue          # unmatched glob stays literal
+    [[ "$f" == *RESCUE* ]] && continue # the rescue image is meant to persist
+    echo "  $f"; found_uki=1
+done
+(( found_uki )) || echo "  ok: no manjaro-*.efi UKIs present"
+echo
+echo "3) Modules dir gone:"
+ls -d /usr/lib/modules/*MANJARO 2>/dev/null || echo "  no module dirs found"
+echo
+echo "4) DKMS state:"
+dkms status 2>/dev/null | grep -E "^\S+/\S+, .*$" || echo "  (dkms not configured or no modules)"
+echo
+echo "5) Boot entries (systemd-boot will autodiscover from /boot/efi/Linux/):"
+ls /boot/efi/Linux/ 2>/dev/null
+echo
+echo "[remove] done. Reboot is not required — running kernel ($RUNNING) is unaffected."

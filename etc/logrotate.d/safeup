@@ -1,0 +1,9 @@
+/var/log/safeup.log {
+    monthly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+}

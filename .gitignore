@@ -1,0 +1,16 @@
+# Deployment / runtime artifacts — machine-specific, never committed
+*.bak
+*.bak-*
+*.tmp
+safeup.log
+safeup-*.log
+
+# Local SEO / launch scratch — the published long-form lives in docs/ABOUT.md
+github-about.txt
+
+# Test scratch (the suites clean up after themselves; this is belt-and-braces)
+tests/tmp/
+tests/*.out
+
+# Agent scratch specs — the design notes that matter live in docs/
+docs/superpowers/

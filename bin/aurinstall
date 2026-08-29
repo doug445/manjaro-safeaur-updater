@@ -1,0 +1,29 @@
+#!/bin/bash
+# aurinstall — `yay -S` with SHA-pin enforcement for VCS sources.
+#
+# Blocks installs whose PKGBUILDs contain git/hg/svn/bzr sources without
+# a `#commit=<40-char-sha>` fragment. Non-VCS sources are unaffected
+# (their integrity is already covered by PKGBUILD sha256sums).
+#
+# Usage:
+#   aurinstall pkg1 pkg2 ...   # same arg surface as `yay -S`
+#
+# Override path: if you've reviewed the PKGBUILD and want to proceed
+# anyway, call `yay -S pkg` directly. That bypass is intentional — the
+# check exists to make bypass a conscious decision, not to prevent it.
+
+set -uo pipefail
+
+if (( $# == 0 )); then
+    echo "usage: $(basename "$0") <pkg>..." >&2
+    exit 2
+fi
+
+if ! aur-pin-check "$@"; then
+    echo "" >&2
+    echo "[aurinstall] aborting — one or more packages have unpinned VCS sources." >&2
+    echo "[aurinstall] override: yay -S $*" >&2
+    exit 1
+fi
+
+exec yay -S "$@"

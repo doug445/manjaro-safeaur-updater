@@ -1,0 +1,117 @@
+#!/bin/bash
+# aur-rebuild-check — find AUR packages with broken library links.
+#
+# After Manjaro bumps a core runtime (python, openssl, glibc, icu, etc.),
+# AUR packages built against the old soname can't find their libs and
+# break at runtime. This scans every AUR-installed ELF file for
+# "=> not found" references and prints the packages needing rebuild.
+#
+# A bare "=> not found" is NOT always a real break. Two false positives
+# are filtered out (otherwise -bin packages like cloudflare-warp-bin get
+# flagged forever — rebuilding a prebuilt repack can never change them):
+#   1. Privately-bundled libs. Flutter/Electron-style apps ship their own
+#      libs in a private dir and load them via an $ORIGIN RPATH on the main
+#      executable. Standalone `ldd` on a plugin .so can't replay that, so it
+#      reports the sibling lib as "not found". If the package itself ships a
+#      file with that soname, it resolves at runtime → not a break.
+#   2. Optional / absent-by-design deps (e.g. libjvm.so for WARP's unused
+#      Dart-JNI plugin). Listed in $ignore_sonames below.
+#
+# Usage:
+#   aur-rebuild-check         # scan + report (exit 1 if any need rebuild)
+#   aur-rebuild-check --fix   # prompt before running yay -S --rebuild
+#   aur-rebuild-check --quiet # no output if nothing to do (for cron)
+#
+# Env:
+#   AUR_REBUILD_IGNORE_SONAMES   space-separated extra sonames to ignore
+#
+# Exit: 0 if clean, 1 if rebuilds needed, 2 on error.
+
+set -uo pipefail
+
+mode=scan
+quiet=0
+for arg in "$@"; do
+    case "$arg" in
+        --fix)   mode=fix ;;
+        --quiet) quiet=1 ;;
+        -h|--help)
+            sed -n '2,14p' "$0" | sed 's/^# \?//'
+            exit 0 ;;
+    esac
+done
+
+msg() { (( quiet )) && return 0; printf '[aur-rebuild] %s\n' "$*" >&2; }
+
+command -v ldd  >/dev/null 2>&1 || { echo "ldd missing"  >&2; exit 2; }
+command -v pacman >/dev/null 2>&1 || { echo "pacman missing" >&2; exit 2; }
+
+# Sonames that are optional / absent-by-design and never a real break.
+# libjvm.so: cloudflare-warp-bin's libdartjni.so references it, but the
+# Dart-JNI plugin is never loaded and no JDK is installed.
+ignore_sonames="libjvm.so ${AUR_REBUILD_IGNORE_SONAMES:-}"
+
+is_ignored_soname() {
+    local s=$1 i
+    for i in $ignore_sonames; do [[ "$s" == "$i" ]] && return 0; done
+    return 1
+}
+
+aur_pkgs=()
+while read -r p; do aur_pkgs+=("$p"); done < <(pacman -Qmq 2>/dev/null)
+
+if (( ${#aur_pkgs[@]} == 0 )); then
+    msg "no AUR packages installed — nothing to check"
+    exit 0
+fi
+
+msg "scanning ${#aur_pkgs[@]} AUR package(s) for broken .so links..."
+
+need_rebuild=()
+for pkg in "${aur_pkgs[@]}"; do
+    # Files this package ships, by basename — so we can tell whether a
+    # "not found" soname is actually a lib the package bundles itself
+    # (resolved at runtime via $ORIGIN RPATH, invisible to standalone ldd).
+    pkg_files=$(pacman -Qlq "$pkg" 2>/dev/null)
+    unset pkg_basenames; declare -A pkg_basenames
+    while read -r pf; do base="${pf##*/}"; [[ -n "$base" ]] && pkg_basenames["$base"]=1; done <<<"$pkg_files"
+
+    pkg_broken=0
+    while read -r f; do
+        [[ -f "$f" && -r "$f" ]] || continue
+        # Skip obvious non-binaries: only .so* files and anything in bin/.
+        # ldd on scripts prints "not a dynamic executable" to stderr —
+        # silenced with 2>/dev/null.
+        while read -r soname; do
+            [[ -n "$soname" ]] || continue
+            [[ -n "${pkg_basenames[$soname]:-}" ]] && continue  # bundled → $ORIGIN-resolved
+            is_ignored_soname "$soname" && continue              # optional/absent-by-design
+            pkg_broken=1
+            break
+        done < <(ldd -- "$f" 2>/dev/null | awk '/=> not found/{print $1}')
+        (( pkg_broken )) && break
+    done < <(printf '%s\n' "$pkg_files" | grep -E '(\.so(\.|$)|/bin/[^/]+$)')
+
+    (( pkg_broken )) && need_rebuild+=("$pkg")
+done
+
+if (( ${#need_rebuild[@]} == 0 )); then
+    msg "all AUR packages have satisfied library links ✓"
+    exit 0
+fi
+
+# Always print results, even in quiet mode — silence was only for the header.
+printf '[aur-rebuild] %d AUR package(s) need rebuild:\n' "${#need_rebuild[@]}" >&2
+printf '  %s\n' "${need_rebuild[@]}" >&2
+echo >&2
+printf '[aur-rebuild] fix: yay -S --rebuild %s\n' "${need_rebuild[*]}" >&2
+
+if [[ "$mode" == fix ]]; then
+    read -r -p "Rebuild now? [y/N] " yn
+    if [[ "$yn" == [yY]* ]]; then
+        yay -S --rebuild "${need_rebuild[@]}"
+        exit $?
+    fi
+fi
+
+exit 1

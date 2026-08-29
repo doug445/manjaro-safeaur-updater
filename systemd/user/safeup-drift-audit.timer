@@ -1,0 +1,12 @@
+[Unit]
+Description=Monthly Manjaro SafeAUR Updater drift audit
+Documentation=https://github.com/doug445/manjaro-safeaur-updater
+
+[Timer]
+OnCalendar=*-*-01 09:00:00
+# Catch up after a month with the machine off, rather than silently skipping.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

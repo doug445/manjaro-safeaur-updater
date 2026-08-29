@@ -1,0 +1,235 @@
+#!/bin/bash
+# safeup — pacman -Syu with ABI-safety guards.
+#
+# Problem 1 (pre-upgrade): Manjaro's core/extra trail Arch by ~1-2 weeks.
+#   Foreign binary repos (BlackArch, chaotic-aur, etc.) track Arch directly.
+#   When Arch bumps python/ruby/openssl, foreign repos rebuild immediately
+#   but Manjaro lags — new packages declare deps Manjaro can't satisfy.
+#   → safeup holds any foreign-repo package whose Depends aren't satisfiable.
+#
+# Problem 2 (post-upgrade): When Manjaro catches up (e.g. python 3.12→3.13),
+#   AUR packages built against the old soname break at runtime.
+#   → safeup invokes aur-rebuild-check at the end to flag stale AUR pkgs.
+#
+# Foreign repos are auto-detected from pacman.conf: anything not in
+# core/extra/multilib (and their *-testing variants).
+#
+# Prompt model: ONE master y/n, then pacman runs --noconfirm. Two
+# recovery paths if pacman fails:
+#   - "unresolvable package conflicts" → re-run interactively so [y/N]
+#     prompts that --noconfirm would auto-reject can be answered by hand.
+#   - "installing X breaks dependency required by Y" → auto-add X to
+#     --ignore and retry, so a single ABI break doesn't block the entire
+#     upgrade. Held packages get logged. Capped at 3 retries.
+#
+# Usage:
+#   safeup                # full flow (one master y/n, then unattended)
+#   safeup --noconfirm    # skip the master prompt; forwarded to pacman
+#
+# Log: /var/log/safeup.log
+
+set -uo pipefail
+
+LOG="${SAFEUP_LOG:-/var/log/safeup.log}"
+MANJARO_REPOS=(core extra multilib community core-testing extra-testing multilib-testing)
+
+msg() { printf '[safeup] %s\n' "$*" >&2; }
+
+# Single master prompt. Skipped if caller already passed --noconfirm.
+confirm_proceed() {
+    for a in "$@"; do [[ "$a" == "--noconfirm" ]] && return 0; done
+    local ans
+    read -r -p "[safeup] proceed with pacman -Syu? [Y/n] " ans </dev/tty
+    case "$ans" in n|N|no|No) msg "aborted by user"; exit 1 ;; esac
+}
+
+# Run pacman -Syu and recover from two common failure modes:
+#   1. "unresolvable package conflicts" — --noconfirm auto-rejects the
+#      "Remove X to resolve conflict?" prompt. Re-run interactively.
+#   2. "installing X breaks dependency '...' required by Y" — an ABI break,
+#      typically a repo upgrade outpacing an AUR consumer. Add X to
+#      --ignore and retry. Repeat (up to MAX_RETRIES) since one skip can
+#      unblock further dep resolution and reveal the next break.
+# All other failures bubble up unchanged. Skipped packages get logged.
+run_pacman_syu() {
+    local logfile rc attempt=0
+    local -i max_retries=3
+    local skipped=()
+    local user_args=("$@")
+    # Only recovery path 1 needs a human: it exists precisely because
+    # --noconfirm auto-rejected a [y/N] prompt. Path 2 (auto-hold an ABI
+    # break) needs nobody, and dropping --noconfirm for it would strand any
+    # non-interactive caller — a cron run, a CI run, a script — on pacman's
+    # "Proceed with installation?" with no tty to answer it.
+    local retry_interactive=0
+
+    logfile=$(mktemp -t safeup.XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '$logfile'" RETURN
+
+    while (( attempt <= max_retries )); do
+        attempt=$((attempt + 1))
+        : > "$logfile"
+
+        # Build runtime arg list: caller args + accumulated --ignore.
+        local args_now=("${user_args[@]}")
+        if (( ${#skipped[@]} > 0 )); then
+            local joined; joined=$(IFS=,; echo "${skipped[*]}")
+            args_now+=(--ignore "$joined")
+        fi
+
+        # First attempt uses --noconfirm (master prompt already covered it),
+        # and so does any retry that does not need a human. Only a retry
+        # flagged interactive strips it, so the prompt that caused the retry
+        # can actually be answered.
+        if (( retry_interactive == 0 )); then
+            sudo pacman -Syu --noconfirm "${args_now[@]}" 2>&1 | tee "$logfile"
+        else
+            local interactive_args=()
+            for a in "${args_now[@]}"; do
+                [[ "$a" == "--noconfirm" ]] || interactive_args+=("$a")
+            done
+            sudo pacman -Syu "${interactive_args[@]}" 2>&1 | tee "$logfile"
+        fi
+        rc=${PIPESTATUS[0]}
+        (( rc == 0 )) && {
+            (( ${#skipped[@]} > 0 )) && {
+                msg ""
+                msg "upgrade succeeded with these package(s) held: ${skipped[*]}"
+                {
+                    echo "=== $(date -Is) auto-skipped: ${#skipped[@]} ==="
+                    printf '  %s\n' "${skipped[@]}"
+                } | sudo tee -a "$LOG" >/dev/null
+            }
+            return 0
+        }
+
+        # Recovery path 1: --noconfirm hit a [y/N] conflict prompt → retry interactive.
+        if (( attempt == 1 )) && grep -q "unresolvable package conflicts" "$logfile"; then
+            msg ""
+            msg "pacman aborted on a conflict prompt that --noconfirm auto-rejected."
+            msg "re-running interactively — answer the conflict prompt(s) by hand."
+            msg ""
+            retry_interactive=1
+            continue
+        fi
+
+        # Recovery path 2: ABI/dep break — auto-skip the breaking pkg(s) and retry.
+        # Pattern: ":: installing protobuf (34.1-1) breaks dependency '...' required by clementine"
+        local new_skips
+        new_skips=$(grep -oE "installing [a-zA-Z0-9._+-]+ \(" "$logfile" \
+                    | awk '{print $2}' | sort -u)
+        if [[ -n "$new_skips" ]]; then
+            local added=0
+            msg ""
+            msg "ABI/dep break detected — auto-holding to let the rest of the upgrade proceed:"
+            while IFS= read -r p; do
+                [[ -z "$p" ]] && continue
+                # Avoid duplicates if pacman re-reports the same break.
+                local already=0
+                for s in "${skipped[@]}"; do [[ "$s" == "$p" ]] && { already=1; break; }; done
+                (( already )) && continue
+                msg "  - $p (rebuild dependent AUR pkg, or wait for upstream)"
+                skipped+=("$p")
+                added=$((added + 1))
+            done <<<"$new_skips"
+            if (( added > 0 )); then
+                msg ""
+                retry_interactive=0
+                continue
+            fi
+        fi
+
+        # No recoverable pattern matched — bubble up.
+        return "$rc"
+    done
+
+    msg "max retries (${max_retries}) exhausted — giving up"
+    return "$rc"
+}
+
+msg "refreshing sync databases..."
+sudo pacman -Sy || { msg "pacman -Sy failed"; exit 1; }
+
+# Discover foreign repos.
+mapfile -t foreign_repos < <(
+    pacman-conf --repo-list | while read -r r; do
+        skip=0
+        for m in "${MANJARO_REPOS[@]}"; do
+            [[ "$r" == "$m" ]] && { skip=1; break; }
+        done
+        (( skip )) || echo "$r"
+    done
+)
+
+if (( ${#foreign_repos[@]} == 0 )); then
+    msg "no foreign repos configured — passing through to plain pacman -Syu"
+    confirm_proceed "$@"
+    run_pacman_syu "$@"
+    pac_rc=$?
+else
+    msg "foreign repos tracked: ${foreign_repos[*]}"
+
+    # Build {pkg -> repo} map across all foreign repos.
+    declare -A foreign_pkg_repo=()
+    for repo in "${foreign_repos[@]}"; do
+        while read -r r name _; do
+            foreign_pkg_repo["$name"]="$r"
+        done < <(pacman -Sl "$repo" 2>/dev/null)
+    done
+
+    # Pending upgrades intersected with foreign repos.
+    candidates=()
+    while read -r pkg _; do
+        [[ -n "${foreign_pkg_repo[$pkg]:-}" ]] && candidates+=("$pkg")
+    done < <(pacman -Qu 2>/dev/null || true)
+
+    hold=()
+    if (( ${#candidates[@]} > 0 )); then
+        msg "checking ${#candidates[@]} pending foreign upgrade(s) for ABI safety..."
+        for pkg in "${candidates[@]}"; do
+            repo="${foreign_pkg_repo[$pkg]}"
+            deps=$(LC_ALL=C pacman -Si "$repo/$pkg" 2>/dev/null \
+                   | awk -F': *' '/^Depends On/ {print $2; exit}')
+            [[ -z "$deps" || "$deps" == "None" ]] && continue
+
+            for d in $deps; do
+                [[ "$d" == *[\<\>=]* ]] || continue
+                if ! pacman -T "$d" >/dev/null 2>&1; then
+                    msg "  hold $pkg ($repo) — unsatisfied dep: $d"
+                    hold+=("$pkg")
+                    break
+                fi
+            done
+        done
+    fi
+
+    ignore_args=()
+    if (( ${#hold[@]} > 0 )); then
+        msg "holding ${#hold[@]} package(s) until Manjaro catches up"
+        joined=$(IFS=,; echo "${hold[*]}")
+        ignore_args=(--ignore "$joined")
+        {
+            echo "=== $(date -Is) held: ${#hold[@]} ==="
+            printf '  %s\n' "${hold[@]}"
+        } | sudo tee -a "$LOG" >/dev/null
+    else
+        msg "no ABI conflicts — all foreign upgrades safe to apply"
+    fi
+
+    # -Syu (not -Su) so the upgrade atomically re-refreshes the DB —
+    # closes the partial-upgrade window if the user aborts between the
+    # initial -Sy (for dep analysis) and this call.
+    msg "running pacman -Syu ${ignore_args[*]-}"
+    confirm_proceed "$@"
+    run_pacman_syu "${ignore_args[@]}" "$@"
+    pac_rc=$?
+fi
+
+# Post-upgrade: AUR rebuild sanity check.
+if (( pac_rc == 0 )) && command -v aur-rebuild-check >/dev/null 2>&1; then
+    echo
+    aur-rebuild-check || true
+fi
+
+exit "$pac_rc"

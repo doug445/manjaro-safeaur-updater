@@ -1,0 +1,14 @@
+{
+	"answerdiff": "None",
+	"answerclean": "None",
+	"cleanmenu": false,
+	"diffmenu": false,
+	"editmenu": false,
+	"combinedupgrade": true,
+	"cleanAfter": false,
+	"pgpfetch": true,
+	"removemake": "ask",
+	"sortby": "votes",
+	"provides": true,
+	"doubleconfirm": true
+}
