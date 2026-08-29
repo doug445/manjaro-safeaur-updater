@@ -95,8 +95,7 @@ fixed, and both now have assertions.
 
 ## Who it is for
 
-Anyone running Manjaro — or EndeavourOS, Garuda, Mabox, or any Arch derivative
-that trails upstream — who uses the AUR and would like to keep using it. It is
+Anyone running Manjaro who uses the AUR and would like to keep using it. It is
 most valuable if you also have BlackArch or chaotic-aur enabled, because those
 track Arch directly and therefore feel the lag hardest.
 

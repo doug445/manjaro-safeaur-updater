@@ -3,7 +3,7 @@
 [![lint](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell: bash](https://img.shields.io/badge/shell-bash-4EAA25.svg)](#requirements)
-[![Tests: 53](https://img.shields.io/badge/tests-53%20passing-brightgreen.svg)](#testing)
+[![Tests: 62](https://img.shields.io/badge/tests-62%20passing-brightgreen.svg)](#testing)
 [![No runtime deps](https://img.shields.io/badge/runtime%20deps-pacman%20%2B%20coreutils-lightgrey.svg)](#requirements)
 
 **Use the AUR on Manjaro without breaking your system.** A small suite of
@@ -14,7 +14,7 @@ package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed.
 
 It is five short bash scripts, no daemon, no runtime dependency beyond pacman
-and coreutils, and 53 tests that run real `pacman` transactions on a loop
+and coreutils, and 62 tests that run real `pacman` transactions on a loop
 device.
 
 ---
@@ -189,9 +189,70 @@ alias yupdate='safeup ; aurupdate'
 | **`safeup`** | `pacman -Syu` | Auto-detects foreign repos from `pacman.conf` (anything outside `core`/`extra`/`multilib`/`community` and their `-testing` variants). Holds any pending foreign upgrade whose version-constrained dependency fails `pacman -T`. Recovers from `installing X breaks dependency … required by Y` by holding `X` and retrying, so one ABI break does not block the whole upgrade. Chains into `aur-rebuild-check` on success. Logs every hold to `/var/log/safeup.log`. |
 | **`aur-rebuild-check`** | — | `ldd`s every ELF owned by every `pacman -Qmq` package and reports `=> not found`. Filters the two false positives that otherwise flag `-bin` packages forever: privately bundled libraries resolved through an `$ORIGIN` RPATH, and optional sonames named in `AUR_REBUILD_IGNORE_SONAMES`. `--fix` offers `yay -S --rebuild`. |
 | **`aur-pin-check`** | — | Fetches `.SRCINFO` from AUR cgit and rejects any `git`/`hg`/`svn`/`bzr` source without `#commit=<40-hex>`. `#tag=` and `#branch=` are rejected on principle. Tarballs pass — `sha256sums` already cover them. Has a TOFU allowlist for tag-pinned upstreams. On rejection it tells you whether the package was deleted from the AUR, or is an installed orphan you should simply remove. |
-| **`aurinstall`** | `yay -S` | Runs the pin-check gate first; refuses to exec `yay` if it fails. |
+| **`aurinstall`** | `yay -S` | Runs the pin-check gate first; refuses to exec `yay` if it fails. Then builds in Manjaro's own `chrootbuild` when that will work, falling back to `yay` with a stated reason when it will not — see [Building in a chroot](#building-in-a-chroot). |
 | **`aurupdate`** | `yay -Sua` | Pin-checks every package with a pending AUR upgrade before any of them build. |
 | **`remove-versioned-kernel`** | `pacman -Rns` | Evicts `linuxNN`, `linuxNN-headers` and `linuxNN-nvidia` in one transaction and rewrites `IgnorePkg` to name only the survivors. Refuses to remove the running kernel or the last one you have. |
+
+### Building in a chroot
+
+`aurinstall --chroot` hands the actual build to
+[`chrootbuild`](https://gitlab.manjaro.org/tools/development-tools/manjaro-chrootbuild),
+from Manjaro's own `manjaro-chrootbuild` package. The suggestion came from
+linux-aarhus of the Manjaro team, and the two tools answer different questions:
+
+| | Question it answers |
+|---|---|
+| `aur-pin-check` | **Which source** am I building? |
+| `chrootbuild` | **Against which libraries**, and where? |
+
+The second one matters specifically because of the lag. An AUR PKGBUILD assumes
+current Arch; building it against your own installed libraries is what produces
+a package linked to a soname Manjaro Stable does not have. `chrootbuild` builds
+inside a chroot synced to a chosen Manjaro branch, so the result links against
+the libraries you actually run — a **build-time** fix for the breakage
+`aur-rebuild-check` can only report after the fact. Build dependencies land in
+the chroot and never touch your system.
+
+```bash
+aurinstall <pkg>              # auto: chroot when it will work, else yay
+aurinstall --chroot <pkg>     # force the chroot; refuse rather than fall back
+aurinstall --no-chroot <pkg>  # force plain yay
+aurinstall --chroot --clean <pkg>   # recreate the chroot from scratch first
+```
+
+**The chroot is the default when it will work.** A gate checks three things
+first, and falls back to `yay` — always saying which one tripped — rather than
+failing:
+
+- `manjaro-chrootbuild` is not installed.
+- The package depends on other AUR packages. `chrootbuild` cannot resolve
+  those; `yay` can.
+- The package is a `*-bin`. Nothing is compiled, so a chroot cannot change what
+  gets installed. It *would* still isolate the PKGBUILD's own execution — a
+  real if smaller benefit — so `--chroot` forces it anyway if you want that.
+
+On a survey of one real system's 49 AUR packages, 42 were chroot-eligible, 7
+had AUR dependencies and 1 was a `-bin`. The fallback is never silent: a tool
+that quietly does something other than what you assumed is the failure mode
+this whole suite exists to prevent. `--chroot` makes it an error instead, and
+`AURINSTALL_MODE=auto|chroot|yay` sets the default.
+
+The wrapper also files down two sharp edges:
+
+- **`chrootbuild`'s default branch is `unstable`.** Passing the wrong branch
+  still exits 0 and silently produces exactly the mismatch you were avoiding.
+  `aurinstall` always passes an explicit `-b`, detected from
+  `pacman-mirrors --get-branch` (override with `AURINSTALL_BRANCH`).
+- **`chrootbuild` has no AUR dependency resolution.** A package whose
+  dependencies are themselves in the AUR fails partway through, after the chroot
+  work. `aurinstall` reads `.SRCINFO` first and refuses up front, naming them.
+
+Installing is a separate, explicit step: the build is the part that had to
+happen in isolation, and putting the result on your system stays your decision.
+
+`manjaro-chrootbuild` lives in Manjaro's `extra` and `deploy.sh` installs it
+along with everything else. If it is missing, the gate says so and falls back to
+`yay` rather than failing.
 
 ### Why `.SRCINFO` and not `PKGBUILD`
 
@@ -228,8 +289,12 @@ purpose, and a tool that oversells itself is worse than no tool.
 - **It does not audit what a PKGBUILD *does*.** Pinning proves you will build
   the same commit you reviewed. It says nothing about whether that commit is
   malicious. Read the PKGBUILD.
-- **It does not sandbox builds.** `makepkg` still runs upstream's build system
-  on your machine, with your user's privileges.
+- **It does not sandbox builds by default.** `makepkg` runs upstream's build
+  system on your machine with your user's privileges. `aurinstall --chroot`
+  moves the build into an isolated chroot (see below), which is a real
+  improvement in blast radius and in *which libraries you link against* — but a
+  chroot is build isolation, not a security boundary, and it does not make a
+  hostile PKGBUILD safe.
 - **It cannot fix a package that genuinely needs a newer library.** Holding it
   is the correct outcome, not a workaround — you wait for Manjaro, or you
   rebuild from source, or you get it from somewhere else.
@@ -244,14 +309,21 @@ purpose, and a tool that oversells itself is worse than no tool.
 
 ## Requirements
 
-Manjaro, or any Arch derivative with `pacman`. Runtime dependencies are
-`pacman`, `curl`, `git`, `awk`, `coreutils` and `glibc`'s `ldd` — all of which
-you already have — plus `logrotate` for the log rotation and `libnotify` for the
-drift-audit notification. `yay` is needed only for `aurinstall` and `aurupdate`.
+**Manjaro.** This is scoped to Manjaro deliberately: the problem it solves is
+created by Manjaro's Stable branch trailing Arch, and `aurinstall --chroot`
+wraps `manjaro-chrootbuild`, which is Manjaro's own tool. On Arch itself there
+is no lag to guard against.
 
-`deploy.sh` installs whatever is missing, and will bootstrap `yay` from the AUR
-on distributions that do not package it (Manjaro ships it in `extra`; plain Arch
-does not) — after showing you the PKGBUILD and asking.
+Runtime dependencies are `pacman`, `curl`, `git`, `awk`, `coreutils` and
+`glibc`'s `ldd` — all of which you already have — plus `logrotate` for the log
+rotation, `libnotify` for the drift-audit notification, `yay` for `aurinstall`
+and `aurupdate`, and **`manjaro-chrootbuild`**, which `aurinstall` uses to build
+by default.
+
+`deploy.sh` installs whatever is missing, after asking. `manjaro-chrootbuild` is
+24 KiB with no dependencies of its own — the ~1.1 GiB chroot it manages is
+created lazily under `/var/lib/chrootbuild` on your first build, not at install
+time.
 
 Everything is bash. There is no language runtime to install, which is
 deliberate: a tool that repairs a broken package manager cannot depend on
@@ -261,10 +333,10 @@ packages installed by that package manager.
 
 ## Testing
 
-Two suites, 53 assertions, both run in CI on every push.
+Two suites, 62 assertions, both run in CI on every push.
 
 ```bash
-bash tests/pin-fixture-test.sh          # 22 assertions — no root, no disk, no network
+bash tests/pin-fixture-test.sh          # 31 assertions — no root, no disk, no network
 sudo bash tests/loopback-core-test.sh   # 31 assertions — root; touches no real disk
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 ```

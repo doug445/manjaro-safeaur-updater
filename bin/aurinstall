@@ -1,29 +1,275 @@
 #!/bin/bash
-# aurinstall — `yay -S` with SHA-pin enforcement for VCS sources.
+# aurinstall — `yay -S` with SHA-pin enforcement for VCS sources,
+#              or `--chroot` to build in an isolated Manjaro chroot instead.
 #
 # Blocks installs whose PKGBUILDs contain git/hg/svn/bzr sources without
 # a `#commit=<40-char-sha>` fragment. Non-VCS sources are unaffected
 # (their integrity is already covered by PKGBUILD sha256sums).
 #
 # Usage:
-#   aurinstall pkg1 pkg2 ...   # same arg surface as `yay -S`
+#   aurinstall pkg1 pkg2 ...            # auto: chroot when it will work
+#   aurinstall --chroot pkg ...         # force the chroot; fail if it cannot
+#   aurinstall --no-chroot pkg ...      # force plain yay
+#   aurinstall --chroot --clean pkg ... # rebuild the chroot from scratch first
+#
+# Mode selection (default: auto, override with AURINSTALL_MODE=auto|chroot|yay)
+# ----------------------------------------------------------------------------
+# `auto` prefers the chroot, because building against the branch you actually
+# run is the correct default on Manjaro. It falls back to yay -- always saying
+# why -- in the three cases where the chroot is the wrong tool:
+#
+#   * manjaro-chrootbuild is not installed
+#   * the package depends on other AUR packages, which chrootbuild cannot
+#     resolve and yay can
+#   * the package is a *-bin. Nothing is compiled, so a chroot cannot change
+#     what ends up installed. It would still isolate the PKGBUILD's own
+#     execution, which is a real if smaller benefit -- the trade is that
+#     against a chroot sync for a package that is just an unpacked tarball.
+#     Use --chroot explicitly if you want that isolation anyway.
+#
+# The fallback is never silent. A tool that quietly does something other than
+# what you think it did is the failure mode this whole suite exists to avoid.
 #
 # Override path: if you've reviewed the PKGBUILD and want to proceed
 # anyway, call `yay -S pkg` directly. That bypass is intentional — the
 # check exists to make bypass a conscious decision, not to prevent it.
+#
+# --chroot mode
+# -------------
+# Hands the build to `chrootbuild` from Manjaro's own manjaro-chrootbuild
+# package (suggested by linux-aarhus of the Manjaro team). The two tools
+# answer different questions and compose well:
+#
+#   aur-pin-check  ->  WHICH SOURCE am I building?
+#   chrootbuild    ->  AGAINST WHICH LIBRARIES, and where?
+#
+# The second one matters on Manjaro specifically. An AUR PKGBUILD assumes
+# current Arch; building it against your own installed libraries is the
+# thing that produces a package linked to a soname Manjaro Stable does not
+# have. chrootbuild builds inside a chroot synced to a chosen Manjaro
+# branch, so the result is linked against the libraries you actually run —
+# a build-time fix for the breakage aur-rebuild-check can only report after
+# the fact. Build dependencies land in the chroot, never on your system.
+#
+# Two sharp edges this wrapper exists to file down:
+#
+#   1. chrootbuild's default branch is UNSTABLE. Passing the wrong branch
+#      still exits 0, and silently produces exactly the mismatch you were
+#      trying to avoid. We always pass an explicit branch, detected from
+#      `pacman-mirrors --get-branch`.
+#   2. chrootbuild has no AUR dependency resolution. A package whose deps
+#      are themselves in the AUR fails partway through, after the chroot
+#      work. We detect that from .SRCINFO first and refuse up front.
+#
+# A chroot is build isolation, not a security boundary. The build still
+# runs upstream's build system; this reduces blast radius and fixes which
+# libraries you link against. It does not make a hostile PKGBUILD safe.
+#
+# Env:
+#   AURINSTALL_BRANCH    override the detected Manjaro branch
 
 set -uo pipefail
 
-if (( $# == 0 )); then
-    echo "usage: $(basename "$0") <pkg>..." >&2
+AUR_BASE="${AUR_SRCINFO_URL:-https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=%s}"
+# Clone base for --chroot mode. Overridable for the same reason the .SRCINFO
+# endpoint is: the fixture suite has to exercise this path against a local
+# repository rather than the real AUR on every run.
+AUR_GIT_BASE="${AUR_GIT_BASE:-https://aur.archlinux.org}"
+
+msg()  { printf '[aurinstall] %s\n' "$*" >&2; }
+die()  { printf '[aurinstall] ERROR: %s\n' "$*" >&2; exit 2; }
+
+mode="${AURINSTALL_MODE:-auto}"
+clean=0
+forced=0
+pkgs=()
+for a in "$@"; do
+    case "$a" in
+        --chroot)    mode=chroot; forced=1 ;;
+        --no-chroot) mode=yay;    forced=1 ;;
+        --clean)     clean=1 ;;
+        -h|--help) /usr/bin/sed -n '2,32p' "$0" | /usr/bin/sed 's/^# \?//'; exit 0 ;;
+        *) pkgs+=("$a") ;;
+    esac
+done
+case "$mode" in
+    auto|chroot|yay) ;;
+    *) echo "[aurinstall] ERROR: AURINSTALL_MODE must be auto, chroot or yay" >&2; exit 2 ;;
+esac
+
+if (( ${#pkgs[@]} == 0 )); then
+    echo "usage: $(basename "$0") [--chroot [--clean]] <pkg>..." >&2
     exit 2
 fi
 
-if ! aur-pin-check "$@"; then
+# --- the gate, unchanged and unconditional ----------------------------------
+if ! aur-pin-check "${pkgs[@]}"; then
     echo "" >&2
     echo "[aurinstall] aborting — one or more packages have unpinned VCS sources." >&2
-    echo "[aurinstall] override: yay -S $*" >&2
+    echo "[aurinstall] override: yay -S ${pkgs[*]}" >&2
     exit 1
 fi
 
-exec yay -S "$@"
+# --- helpers the gate needs -------------------------------------------------
+
+# Where chrootbuild will leave the artifact: makepkg.conf's PKGDEST, falling
+# back to the working directory. Resolved the same way chrootbuild resolves it.
+mp_conf_value() {
+    local key="$1" v=""
+    for f in "$HOME/.makepkg.conf" /etc/makepkg.conf; do
+        [[ -r "$f" ]] || continue
+        v=$(/usr/bin/awk -v k="$key" '
+            $0 ~ "^[[:space:]]*"k"=" { sub("^[[:space:]]*"k"=", ""); gsub(/"/,""); print; exit }
+        ' "$f")
+        [[ -n "$v" ]] && { echo "$v"; return 0; }
+    done
+    return 1
+}
+
+# chrootbuild cannot resolve AUR dependencies. Find that out from .SRCINFO
+# before spending a chroot build on it, not halfway through one.
+aur_deps_of() {
+    local pkg="$1" url srcinfo dep name missing=()
+    printf -v url "$AUR_BASE" "$pkg"
+    srcinfo=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) || return 0
+    while IFS= read -r dep; do
+        # strip any version constraint: foo>=1.2 -> foo
+        name="${dep%%[<>=]*}"
+        [[ -z "$name" ]] && continue
+        # satisfied by a repo package, an installed package, or a provider?
+        pacman -Si "$name"  >/dev/null 2>&1 && continue
+        pacman -Qq "$name"  >/dev/null 2>&1 && continue
+        pacman -Ssq "^${name}$" >/dev/null 2>&1 && continue
+        missing+=("$name")
+    done < <(/usr/bin/awk -F' = ' '
+        /^[[:space:]]*(depends|makedepends|checkdepends) *=/ {print $2}' <<<"$srcinfo")
+    (( ${#missing[@]} )) && printf '%s\n' "${missing[@]}"
+    return 0
+}
+
+# --- the chroot gate --------------------------------------------------------
+# Decides whether the chroot is the right tool for THIS invocation. Echoes a
+# human-readable reason when it is not, and returns non-zero. Every rejection
+# is reported: a fallback that happens quietly is indistinguishable, from the
+# outside, from the tool doing what you assumed it did.
+chroot_gate() {
+    local pkg deps
+
+    command -v chrootbuild >/dev/null 2>&1 \
+        || { echo "manjaro-chrootbuild is not installed (pacman -S manjaro-chrootbuild)"; return 1; }
+    command -v git >/dev/null 2>&1 \
+        || { echo "git is not installed"; return 1; }
+    command -v pacman-mirrors >/dev/null 2>&1 || [[ -n "${AURINSTALL_BRANCH:-}" ]] \
+        || { echo "cannot detect the Manjaro branch (no pacman-mirrors; set AURINSTALL_BRANCH)"; return 1; }
+
+    for pkg in "${pkgs[@]}"; do
+        # A -bin package ships a prebuilt binary. Nothing is compiled, so a
+        # clean chroot cannot change the shipped ELF -- it would cost a chroot
+        # sync to achieve nothing.
+        if [[ "$pkg" == *-bin ]]; then
+            echo "$pkg is a -bin package: nothing is compiled, so a chroot cannot change what gets installed (--chroot forces it anyway)"
+            return 1
+        fi
+        mapfile -t deps < <(aur_deps_of "$pkg")
+        if (( ${#deps[@]} > 0 )); then
+            echo "$pkg needs AUR dependencies chrootbuild cannot resolve: ${deps[*]}"
+            return 1
+        fi
+    done
+    return 0
+}
+
+if [[ "$mode" != yay ]]; then
+    if gate_reason=$(chroot_gate); then
+        mode=chroot
+    else
+        if (( forced )); then
+            # --chroot was explicit. Refusing is right; silently doing
+            # something else would not be.
+            die "--chroot cannot be used here: $gate_reason"
+        fi
+        msg "using yay: $gate_reason"
+        mode=yay
+    fi
+fi
+
+if [[ "$mode" == yay ]]; then
+    exec yay -S "${pkgs[@]}"
+fi
+
+# ---------------------------------------------------------------------------
+# chroot mode
+# ---------------------------------------------------------------------------
+# Never rely on chrootbuild's default branch: it is 'unstable', and a build
+# against the wrong branch succeeds silently.
+branch="${AURINSTALL_BRANCH:-}"
+if [[ -z "$branch" ]]; then
+    branch=$(pacman-mirrors --get-branch 2>/dev/null) \
+        || die "could not detect your branch; set AURINSTALL_BRANCH=stable|testing|unstable"
+fi
+[[ -n "$branch" ]] || die "empty branch; set AURINSTALL_BRANCH explicitly"
+
+pkgdest=$(mp_conf_value PKGDEST) || pkgdest="$PWD"
+[[ -d "$pkgdest" ]] || die "PKGDEST '$pkgdest' does not exist"
+
+msg "branch: $branch   chroot: /var/lib/chrootbuild   PKGDEST: $pkgdest"
+
+workdir=$(mktemp -d -t aurinstall-chroot.XXXXXX) || die "mktemp failed"
+# shellcheck disable=SC2064
+trap "rm -rf '$workdir'" EXIT
+
+built=()
+for pkg in "${pkgs[@]}"; do
+    msg ""
+    msg "=== $pkg ==="
+    git clone --quiet "${AUR_GIT_BASE}/${pkg}.git" "$workdir/$pkg" \
+        || die "could not clone $pkg from the AUR"
+
+    # Snapshot PKGDEST so we can tell exactly which files this build produced,
+    # rather than guessing the artifact name from pkgver/pkgrel/arch.
+    before=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
+
+    cb_args=(-p "$pkg" -b "$branch")
+    (( clean )) && cb_args=(-c "${cb_args[@]}")
+    msg "running: sudo chrootbuild ${cb_args[*]}"
+    ( cd "$workdir" && sudo chrootbuild "${cb_args[@]}" ) || die "chrootbuild failed for $pkg"
+
+    after=$(/usr/bin/find "$pkgdest" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort)
+    mapfile -t new < <(comm -13 <(echo "$before") <(echo "$after"))
+    if (( ${#new[@]} == 0 )); then
+        die "chrootbuild reported success but produced no package in $pkgdest"
+    fi
+    msg "built: ${new[*]##*/}"
+    built+=("${new[@]}")
+done
+
+echo "" >&2
+msg "${#built[@]} package(s) built against branch '$branch':"
+printf '    %s\n' "${built[@]}" >&2
+echo "" >&2
+
+# Installing is a separate, explicit step: the build is the part that had to
+# happen in isolation, and putting the result on your system is your call.
+# `read -p` writes its prompt to stderr, so blanket-silencing stderr here would
+# hide the question itself. Test for a usable terminal instead, which also
+# avoids bash printing a redirection error when there is none (cron, CI, a pipe).
+ans=n
+# `-r /dev/tty` is NOT a sufficient test: the device node exists and is
+# readable by permission even in a process with no controlling terminal, where
+# opening it then fails with ENXIO. Attempt the open and see.
+if { : </dev/tty; } 2>/dev/null; then
+    read -r -p "[aurinstall] install them now with pacman -U? [y/N] " ans </dev/tty || ans=n
+else
+    msg "no terminal available — not installing automatically."
+fi
+case "$ans" in
+    y|Y|yes|Yes)
+        sudo pacman -U "${built[@]}"
+        exit $?
+        ;;
+    *)
+        msg "not installed. To install later:"
+        msg "  sudo pacman -U ${built[*]}"
+        exit 0
+        ;;
+esac

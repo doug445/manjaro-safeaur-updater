@@ -1,6 +1,6 @@
 # Security Policy
 
-**Manjaro SafeAUR Updater 1.1.0**
+**Manjaro SafeAUR Updater 1.2.0**
 
 ## Supported Versions
 
@@ -33,8 +33,9 @@ report either way — it changes what I can reproduce.
 
 Say which distribution you are on and which third-party repositories you have
 enabled (`pacman-conf --repo-list`). This tooling keys its behaviour off what is
-in `pacman.conf`, not off a distro name, so "Manjaro with BlackArch" and
-"EndeavourOS with chaotic-aur" are different paths through the same script.
+in `pacman.conf`, not off a branch name, so "Manjaro Stable with BlackArch"
+and "Manjaro Testing with chaotic-aur" are different paths through the same
+script.
 
 ## Reporting a Vulnerability
 

@@ -63,6 +63,11 @@ RUNTIME_DEPS=(
     "awk         gawk"          # .SRCINFO and pacman -Si parsing throughout
     "logrotate   logrotate"     # /etc/logrotate.d/safeup is inert without it
     "notify-send libnotify"     # audit-drift.sh's desktop notification
+    # aurinstall builds in a chroot BY DEFAULT, so this is core, not optional.
+    # The package itself is 24 KiB with no dependencies; the ~1.1 GiB chroot it
+    # manages is created lazily under /var/lib/chrootbuild on the first build,
+    # not at install time.
+    "chrootbuild manjaro-chrootbuild"
 )
 # Needed by tests/ only, never at runtime.
 TEST_ONLY_DEPS=(

@@ -53,6 +53,23 @@
 #   17. aurinstall refuses to exec yay when the gate fails, and passes when it
 #       succeeds — the gate is load-bearing, not decorative
 #   18. aurupdate pin-checks the pending set and aborts on a failure
+#   19. --chroot still runs the pin-check gate first, and an unpinned package
+#       never reaches chrootbuild
+#   20. --chroot refuses a package whose dependencies are themselves in the
+#       AUR, BEFORE spending a chroot build on it -- chrootbuild has no AUR
+#       dependency resolution and would fail partway through
+#   21. --chroot always passes an explicit -b <branch>; chrootbuild's default
+#       is 'unstable', and building against the wrong branch still exits 0
+#       while producing exactly the soname mismatch this suite exists to stop
+#   22. --chroot builds the package it was asked for
+#   23. auto mode (no flag) uses the chroot when the package is eligible
+#   24. auto mode falls back to yay when deps are in the AUR, and REPORTS why
+#   25. auto mode sends *-bin to yay: nothing is compiled, so a chroot cannot
+#       change the shipped ELF and would only cost a chroot sync
+#   26. an explicit --chroot on an ineligible package is an ERROR -- forcing a
+#       mode and then silently getting another one is the failure this suite
+#       exists to prevent
+#   27. --no-chroot forces yay even when the chroot would have worked
 #
 # Run:  bash tests/pin-fixture-test.sh
 # Requires: bash >= 4, git, curl (with file:// support), awk, coreutils.
@@ -96,6 +113,7 @@ case "$1" in
   -Si)   grep -qxF -- "$2" "$WORK_REPO_PKGS" 2>/dev/null && { echo "Repository : extra"; exit 0; }; exit 1 ;;
   -Qq)   grep -qxF -- "$2" "$WORK_INSTALLED" 2>/dev/null && { echo "$2"; exit 0; }; exit 1 ;;
   -Qdtq) cat "$WORK_ORPHANS" 2>/dev/null; exit 0 ;;
+  -Ssq)  exit 1 ;;   # no provider search hits in fixtures
   *)     exit 1 ;;
 esac
 SHIM
@@ -115,6 +133,27 @@ SHIM
 chmod +x "$WORK/shim/yay"
 export WORK_YAY_LOG="$WORK/yay.log" WORK_YAY_QUA="$WORK/yay-qua"
 : > "$WORK_YAY_LOG"; : > "$WORK_YAY_QUA"
+
+# chrootbuild + pacman-mirrors stubs, for --chroot mode. chrootbuild records
+# its argv so we can assert on the branch flag rather than assume it.
+cat > "$WORK/shim/chrootbuild" <<'SHIM'
+#!/bin/bash
+printf '%s\n' "$*" >> "$WORK_CB_LOG"
+exit 0
+SHIM
+cat > "$WORK/shim/pacman-mirrors" <<'SHIM'
+#!/bin/bash
+[[ "${1:-}" == "--get-branch" ]] && { echo stable; exit 0; }
+exit 1
+SHIM
+# --chroot calls chrootbuild through sudo; run it directly under test.
+cat > "$WORK/shim/sudo" <<'SHIM'
+#!/bin/bash
+exec "$@"
+SHIM
+chmod +x "$WORK/shim/chrootbuild" "$WORK/shim/pacman-mirrors" "$WORK/shim/sudo"
+export WORK_CB_LOG="$WORK/chrootbuild.log"
+: > "$WORK_CB_LOG"
 
 # Write a .SRCINFO fixture: srcinfo <pkg> <source-line>...
 srcinfo() {
@@ -315,7 +354,8 @@ else
 fi
 
 : > "$WORK_YAY_LOG"
-aurinstall pinned >/dev/null 2>&1
+# --no-chroot, because auto mode now prefers the chroot for an eligible package.
+aurinstall --no-chroot pinned >/dev/null 2>&1
 if grep -q -- '-S pinned' "$WORK_YAY_LOG"; then
     pass "aurinstall execs 'yay -S' when pin-check passes"
 else
@@ -349,6 +389,124 @@ if (( rc == 0 )) && ! grep -q -- '-Sua' "$WORK_YAY_LOG"; then
     pass "aurupdate exits 0 without upgrading when nothing is pending"
 else
     fail "empty pending set was not handled cleanly (rc=$rc)"
+fi
+
+# =============================================================================
+echo "== 19-22. aurinstall --chroot =="
+# =============================================================================
+# --chroot hands the build to Manjaro's own chrootbuild. The gate must still
+# run first, the branch must never be left to chrootbuild's default (which is
+# 'unstable' and would silently build against the wrong libraries), and a
+# package whose dependencies are themselves in the AUR must be refused BEFORE
+# a chroot build is spent on it, since chrootbuild cannot resolve those.
+
+# A local "AUR" to clone from, so no network is touched.
+AURGIT="$WORK/aurgit"; mkdir -p "$AURGIT"
+mk_aur_repo() {
+    local pkg="$1"
+    local d="$AURGIT/$pkg.git"
+    rm -rf "$d"; mkdir -p "$d"
+    ( cd "$d" && git init -q . && printf 'pkgname=%s\npkgver=1.0\n' "$pkg" > PKGBUILD \
+      && git add PKGBUILD \
+      && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
+}
+export AUR_GIT_BASE="file://$AURGIT"
+export PKGDEST_TEST="$WORK/pkgdest"; mkdir -p "$PKGDEST_TEST"
+
+# 19. the pin-check gate still runs, and nothing reaches chrootbuild
+: > "$WORK_CB_LOG"
+aurinstall --chroot bare >/dev/null 2>&1; rc=$?
+if (( rc == 1 )) && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "--chroot still refuses an unpinned source before reaching chrootbuild"
+else
+    fail "--chroot bypassed the pin-check gate (rc=$rc)"
+fi
+
+# 20. AUR dependencies are detected up front and refused
+srcinfo needsaur "https://example.invalid/x.tar.gz"
+printf '\tdepends = totally-not-a-real-package-xyz\n' >> "$WORK/srcinfo/needsaur.SRCINFO"
+rpc needsaur 1
+mk_aur_repo needsaur
+: > "$WORK_CB_LOG"
+out=$(aurinstall --chroot needsaur 2>&1); rc=$?
+if (( rc == 2 )) && grep -q 'AUR dependencies chrootbuild cannot resolve' <<<"$out" \
+   && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "--chroot refuses a package with AUR deps before spending a chroot build"
+else
+    fail "--chroot did not refuse unresolvable AUR deps (rc=$rc)"
+fi
+
+# 21. a clean package reaches chrootbuild WITH an explicit branch
+srcinfo cleanpkg "https://example.invalid/clean.tar.gz"
+rpc cleanpkg 1
+mk_aur_repo cleanpkg
+: > "$WORK_CB_LOG"
+aurinstall --chroot cleanpkg </dev/null >/dev/null 2>&1
+if grep -q -- '-b stable' "$WORK_CB_LOG"; then
+    pass "--chroot passes an explicit branch, never chrootbuild's 'unstable' default"
+else
+    fail "chrootbuild was invoked without an explicit branch: $(cat "$WORK_CB_LOG")"
+fi
+
+# 22. ...and the package name is what got built
+if grep -q -- '-p cleanpkg' "$WORK_CB_LOG"; then
+    pass "--chroot builds the requested package"
+else
+    fail "wrong package passed to chrootbuild: $(cat "$WORK_CB_LOG")"
+fi
+
+# --- the gate, in auto mode -------------------------------------------------
+# 23. an eligible package goes to the chroot with no flag at all
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+aurinstall cleanpkg </dev/null >/dev/null 2>&1
+if grep -q -- '-p cleanpkg' "$WORK_CB_LOG" && ! grep -q -- '-S ' "$WORK_YAY_LOG"; then
+    pass "auto mode uses the chroot for an eligible package, with no flag"
+else
+    fail "auto mode did not choose the chroot (cb='$(cat "$WORK_CB_LOG")')"
+fi
+
+# 24. a package with AUR deps falls back to yay, and SAYS SO
+srcinfo needsaur2 "https://example.invalid/x.tar.gz"
+printf '\tdepends = totally-not-a-real-package-xyz\n' >> "$WORK/srcinfo/needsaur2.SRCINFO"
+rpc needsaur2 1; mk_aur_repo needsaur2
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(aurinstall needsaur2 </dev/null 2>&1)
+if grep -q -- '-S needsaur2' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]] \
+   && grep -q 'using yay:' <<<"$out"; then
+    pass "auto mode falls back to yay on AUR deps, and reports the reason"
+else
+    fail "auto fallback wrong (yay='$(cat "$WORK_YAY_LOG")', said: $(grep -c 'using yay' <<<"$out"))"
+fi
+
+# 25. a -bin package is not worth a chroot; nothing is compiled
+srcinfo thing-bin "https://example.invalid/x.tar.gz"
+rpc thing-bin 1; mk_aur_repo thing-bin
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(aurinstall thing-bin </dev/null 2>&1)
+if grep -q -- '-S thing-bin' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]] \
+   && grep -q 'nothing is compiled' <<<"$out"; then
+    pass "auto mode sends a -bin package to yay, saying nothing is compiled"
+else
+    fail "-bin package was not routed to yay"
+fi
+
+# 26. --chroot on an ineligible package is an ERROR, never a silent fallback
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+out=$(aurinstall --chroot needsaur2 </dev/null 2>&1); rc=$?
+if (( rc == 2 )) && grep -q 'cannot be used here' <<<"$out" \
+   && [[ ! -s "$WORK_YAY_LOG" ]]; then
+    pass "--chroot refuses an ineligible package instead of quietly using yay"
+else
+    fail "forced --chroot fell back silently (rc=$rc)"
+fi
+
+# 27. --no-chroot forces yay even when the chroot would have worked
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
+aurinstall --no-chroot cleanpkg </dev/null >/dev/null 2>&1
+if grep -q -- '-S cleanpkg' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "--no-chroot forces yay even for a chroot-eligible package"
+else
+    fail "--no-chroot did not force yay"
 fi
 
 echo ""
