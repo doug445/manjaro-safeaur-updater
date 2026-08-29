@@ -202,7 +202,7 @@ would be running the thing it was asked to decide about.
 
 ### Why `#tag=` is rejected
 
-A tag is a mutable pointer. Upstream can move it, and a compromised or careless
+A tag is a mutable pointer. Upstream can move it, or a compromised or careless
 maintainer can move it silently. If you genuinely need a tag-pinned package,
 the allowlist records the SHA that tag pointed at **when you vetted it**, and
 `aur-pin-check` re-resolves the tag with `git ls-remote` on every run. The day
