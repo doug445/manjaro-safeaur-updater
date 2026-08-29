@@ -45,7 +45,7 @@ resented property of Manjaro. It is worth reading the complaint before the fix.
 > How-To Geek, 1 September 2025
 
 Manjaro's own moderators do not dispute the risk. They document it and decline
-to own it:
+to fix it:
 
 > "Remember, the AUR is neither officially supported by Arch nor by Manjaro.
 > Using it is at your own risk and your own responsibility."
