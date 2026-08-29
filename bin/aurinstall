@@ -61,6 +61,17 @@
 #      are themselves in the AUR fails partway through, after the chroot
 #      work. We detect that from .SRCINFO first and refuse up front.
 #
+#      Chaining builds in dependency order (-i each dep into the chroot)
+#      was considered and rejected. The ordering itself is a topological
+#      sort over .SRCINFO and is the easy half; the real blocker, confirmed
+#      by linux-aarhus's own experiments with the flightgear chain, is that
+#      mid-chain sources can simply be gone (his qt6-tools: "source does
+#      not exist") -- and no build order fixes an absent source. That is
+#      the same failure class aur-pin-check already triages: AUR cgit
+#      serves deleted packages' repos forever, so a chain can reference
+#      something that looks present and is years dead. Refusing and
+#      handing the chain to yay is the honest behaviour.
+#
 # A chroot is build isolation, not a security boundary. The build still
 # runs upstream's build system; this reduces blast radius and fixes which
 # libraries you link against. It does not make a hostile PKGBUILD safe.
