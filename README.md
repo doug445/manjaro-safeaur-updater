@@ -158,7 +158,7 @@ purpose, and a tool that oversells itself is worse than no tool.
 
 - **It does not make Manjaro track Arch.** The lag is Manjaro's design choice.
   This handles the consequences; it does not remove the cause. If you want
-  Arch's timing, run Arch.
+  Arch's timing, you must run Arch.
 - **It does not audit what a PKGBUILD *does*.** Pinning proves you will build
   the same commit you reviewed. It says nothing about whether that commit is
   malicious. Read the PKGBUILD.
