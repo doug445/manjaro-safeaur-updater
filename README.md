@@ -21,17 +21,9 @@ device.
 
 ## The problem, in other people's words
 
-This suite exists because of a specific, well-documented, and genuinely
-resented property of Manjaro. It is worth reading the complaint before the fix.
-
-> "You've probably seen across their resources that Manjaro holds Arch packages
-> behind for two weeks. Stability is stated as the reason for this, but that
-> doesn't make much sense. […] most of these scripts are written with the
-> assumption that you aren't running a system that's effectively two weeks out
-> of date. **This causes partial upgrades.**"
->
-> — [*Manjarno*](https://manjarno.pages.dev/), a catalogue of Manjaro incidents
-> maintained by EmeraldSnorlax
+This suite exists because of a specific, well-documented property of Manjaro:
+its Stable branch trails Arch, while the AUR does not. That gap is the whole
+story, and it is worth reading the complaint before the fix.
 
 > "some AUR packages require certain dependencies to run, which they expect to
 > install from the official Arch repo. However, on Manjaro, the necessary
@@ -61,8 +53,13 @@ to fix it:
 > AUR*](https://forum.manjaro.org/t/need-to-know-about-manjaro-and-aur/103617),
 > Manjaro Linux Forum, 23 February 2022
 
-So: the AUR assumes you are current with Arch. Manjaro deliberately is not.
-Nobody supports the gap. **This suite is the gap, handled.**
+That second sentence is an accurate description of the failure mode, and it is
+also an accurate description of what this suite exists to detect. Being told
+the risk is yours is only useful if you have some way of seeing it.
+
+So: the AUR assumes you are current with Arch. Manjaro's Stable branch
+deliberately is not. Nobody supports the gap. **This suite is the gap,
+handled.**
 
 ---
 
