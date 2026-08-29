@@ -3,7 +3,7 @@
 [![lint](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/manjaro-safeaur-updater/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell: bash](https://img.shields.io/badge/shell-bash-4EAA25.svg)](#requirements)
-[![Tests: 49](https://img.shields.io/badge/tests-49%20passing-brightgreen.svg)](#testing)
+[![Tests: 53](https://img.shields.io/badge/tests-53%20passing-brightgreen.svg)](#testing)
 [![No runtime deps](https://img.shields.io/badge/runtime%20deps-pacman%20%2B%20coreutils-lightgrey.svg)](#requirements)
 
 **Use the AUR on Manjaro without breaking your system.** A small suite of
@@ -14,7 +14,7 @@ package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed.
 
 It is five short bash scripts, no daemon, no runtime dependency beyond pacman
-and coreutils, and 49 tests that run real `pacman` transactions on a loop
+and coreutils, and 53 tests that run real `pacman` transactions on a loop
 device.
 
 ---
@@ -80,6 +80,72 @@ AUR itself.
 Completely, for the three failures above — that is what the test suite
 demonstrates, package by package. Not completely, for Manjaro in general.
 Read [What this does not do](#what-this-does-not-do) before you rely on it.
+
+---
+
+## "But this automates `pacman --ignore`"
+
+It does, and that deserves a real answer rather than reassurance. `--ignore` is
+listed on the Arch wiki as a way to **cause** partial upgrades, so a tool that
+reaches for it automatically is right to be treated with suspicion.
+
+**`--ignore` suppresses an upgrade. It does not suppress dependency
+resolution.** pacman still resolves the entire transaction and refuses one that
+would leave a dependency unsatisfied. Here is that being tested rather than
+asserted — `consumer 1.0` requires `libX=1.0`, both have upgrades pending, and
+`libX` is ignored so that `consumer 2.0` would need a `libX 2.0` that will not
+be installed:
+
+```console
+$ pacman -Syu --noconfirm --ignore libX
+warning: ignoring package libX-2.0-1
+warning: cannot resolve "libX=2.0", a dependency of "consumer"
+error: failed to prepare transaction (could not satisfy dependencies)
+:: unable to satisfy dependency 'libX=2.0' required by consumer
+                                                            exit 1
+
+$ pacman -Q                       # nothing moved
+consumer 1.0-1
+libX 1.0-1
+
+$ pacman -Dk                      # pacman's own consistency audit
+No database errors have been found!
+```
+
+You cannot `--ignore` your way into an unsatisfied dependency. **pacman is the
+backstop, not this script** — which is the correct arrangement, because pacman
+is the thing that actually knows.
+
+That transcript is section 19 of
+[`tests/loopback-core-test.sh`](tests/loopback-core-test.sh) and runs in CI on
+every push, against real pacman transactions. It is deliberately a test of
+*pacman's* behaviour rather than of this code: the safety argument for the whole
+suite rests on that property, nothing here would notice if a future pacman
+changed it, and the consequence would be silent. The same section then asserts
+that a real `safeup` hold inherits it — `pacman -Dk` still reports a consistent
+system afterwards.
+
+Beyond that guarantee, **what** gets held matters:
+
+- It only holds a package whose version-constrained dependency is **already
+  unsatisfiable** — one that cannot install correctly at that moment regardless.
+- It holds the **new** version back, so the package keeps the dependencies it
+  already had and stays in the state it was already working in. The classic
+  dangerous pattern is pinning a *library* while upgrading its dependents; this
+  is the opposite direction.
+- The realistic alternative is not a clean full upgrade. It is a refused
+  transaction, or a person reaching for `--ignore` by hand with worse aim.
+- Every hold is printed and written to `/var/log/safeup.log`. A silent
+  indefinite pin is the real long-term hazard, so a hold is made into a
+  *deferred* upgrade you can chase rather than a package that quietly stops
+  updating.
+
+**The limitation, stated plainly:** `safeup` does not pre-check whether a
+package it holds is itself required by something else in the same transaction.
+It relies on pacman refusing, and then isolates the break. The transcript above
+is why that is acceptable — but it works that way because pacman is sound, not
+because this script is clever, and you should know which of those you are
+trusting.
 
 ---
 
@@ -195,11 +261,11 @@ packages installed by that package manager.
 
 ## Testing
 
-Two suites, 49 assertions, both run in CI on every push.
+Two suites, 53 assertions, both run in CI on every push.
 
 ```bash
 bash tests/pin-fixture-test.sh          # 22 assertions — no root, no disk, no network
-sudo bash tests/loopback-core-test.sh   # 27 assertions — root; touches no real disk
+sudo bash tests/loopback-core-test.sh   # 31 assertions — root; touches no real disk
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 ```
 

@@ -74,6 +74,13 @@
 #       the post-removal probes run after the work is already done and must
 #       never turn a completed removal into a failure exit
 #   18. ...and still exits 0, and still lists the images, when it does
+#   19. --ignore cannot manufacture a partial upgrade: pacman still resolves
+#       the whole transaction and REFUSES one that would strand a dependency,
+#       changing nothing -- and a real safeup hold inherits that, leaving a
+#       system that `pacman -Dk` still calls consistent. This is the property
+#       the entire suite's safety argument rests on, and it is an assumption
+#       about pacman rather than about this code, so nothing here would notice
+#       if it silently changed.
 #
 # Run as root:  sudo bash tests/loopback-core-test.sh
 # Requires: pacman, repo-add, bsdtar (libarchive), losetup, mkfs.ext4, cc.
@@ -507,6 +514,60 @@ if [ "$rc" = "0" ] && grep -q 'manjaro-linux99.efi' <<<"$out"; then
     pass "removal exits 0 and still lists the UKIs when the directory exists"
 else
     fail "UKI-present path broken (rc=$rc): $(grep -i 'boot entries' -A2 <<<"$out" | tr '\n' ' ')"
+fi
+
+# =============================================================================
+echo ""
+echo "== 19. --ignore cannot manufacture a partial upgrade =="
+# =============================================================================
+# The safety argument for this whole suite rests on one property of pacman:
+# --ignore suppresses an UPGRADE, it does not suppress DEPENDENCY RESOLUTION.
+# If that were not true, safeup's holds would be a partial-upgrade generator
+# rather than a partial-upgrade guard, and the tool would be actively harmful.
+#
+# It is an assumption about pacman rather than about our own code, which is
+# exactly why it belongs in a test: nothing in this repository would notice if
+# a future pacman changed it, and the consequence would be silent.
+mkenv ignoresafety
+# consumer 1.0 needs libX=1.0 exactly, and both are installed and consistent.
+LIBX1=$(mkpkg libX 1.0-1)
+CONS1=$(mkpkg consumer 1.0-1 "libX=1.0")
+pacman -U --noconfirm "$LIBX1" "$CONS1" >/dev/null 2>&1
+# The repo offers both upgrades; consumer 2.0 requires the NEW libX.
+publish "$REPO_M" extra "$(mkpkg libX 2.0-1)" "$(mkpkg consumer 2.0-1 "libX=2.0")"
+pacman -Sy >/dev/null 2>&1
+
+# Ignoring libX would strand consumer 2.0 against a libX 2.0 that is not there.
+# This is the exact shape of the partial upgrade people fear.
+pacman -Syu --noconfirm --ignore libX >/dev/null 2>&1; rc=$?
+[ "$rc" != "0" ] \
+    && pass "pacman refuses an --ignore transaction that would strand a dependency" \
+    || fail "pacman accepted a transaction leaving consumer 2.0 without libX 2.0"
+
+if [ "$(installed_ver libX)" = "1.0-1" ] && [ "$(installed_ver consumer)" = "1.0-1" ]; then
+    pass "the refused transaction changed nothing — no half-applied upgrade"
+else
+    fail "system moved: libX=$(installed_ver libX) consumer=$(installed_ver consumer)"
+fi
+
+# pacman's own database consistency check is the impartial judge here.
+pacman -Dk >/dev/null 2>&1 \
+    && pass "pacman -Dk: every dependency still satisfied after the refusal" \
+    || fail "pacman -Dk reports an inconsistent system"
+
+# And the same audit after a REAL safeup hold, which is the case that actually
+# ships: proving pacman refuses is only useful if safeup's own holds inherit it.
+mkenv holdconsistency blackarch
+publish "$REPO_M" extra "$(mkpkg libz 1.0-1)"
+LIBZ1="$ENV_DIR/build/libz-1.0-1-$ARCH.pkg.tar.gz"
+TOOLZ1=$(mkpkg toolz 1.0-1 "libz>=1.0")
+publish "$REPO_F" blackarch "$(mkpkg toolz 2.0-1 "libz>=2.0")"
+pacman -U --noconfirm "$LIBZ1" "$TOOLZ1" >/dev/null 2>&1
+out=$(safeup --noconfirm </dev/null 2>&1)
+if grep -q 'hold toolz' <<<"$out" && pacman -Dk >/dev/null 2>&1; then
+    pass "after a real safeup hold, pacman -Dk still reports a consistent system"
+else
+    fail "safeup's hold left the system inconsistent, or did not hold at all"
 fi
 
 echo ""
