@@ -413,13 +413,10 @@ is endorsed by, or represents, the Manjaro team — it uses Manjaro's own
 `manjaro-chrootbuild` as one of its tools, and that is the extent of the
 relationship. It does not make the AUR supported, by anyone.
 
-**AI disclosure.** Substantial parts of this code were written with an AI
-assistant (Anthropic's Claude), used as a tool under the author's direction:
-every line is reviewed and tested, and responsibility for all of it is the
-author's. That involvement is recorded openly in the commit history
-(`Co-Authored-By` trailers). The CI suite — real pacman transactions against
-throwaway loop devices — exists precisely so that correctness never rests on
-anyone's word, the author's or a model's.
+**AI disclosure.** CI and loopback tests designed and authored by Claude. The CI
+suite — real pacman transactions against throwaway loop devices — exists
+precisely so that correctness never rests on anyone's word, the author's or a
+model's.
 
 ## Contributing
 
