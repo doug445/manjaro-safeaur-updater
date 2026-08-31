@@ -1,6 +1,6 @@
 # Contributing
 
-**Manjaro SafeAUR Updater 1.2.0**
+**Manjaro SafeAUR Updater 1.3.0**
 
 This project gates what gets installed on your machine. Every added code path is
 a path that can wave something through, and there is one maintainer to be sure

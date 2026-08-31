@@ -1,7 +1,7 @@
 # Security Policy
 
-**Manjaro SafeAUR Updater 1.2.0**
-
+**Manjaro SafeAUR Updater 1.3.0**
+ 
 ## Supported Versions
 
 This project is maintained by one person and carries no backport branches.
