@@ -98,6 +98,13 @@
 #       bin/ — /opt/<app>/<exe> is where a great many AUR packages live
 #   25. it flags a pure-Python package stranded in the PREVIOUS interpreter's
 #       site-packages after a python bump, and not one under the current dir
+#   26. remove-versioned-kernel takes EVERY extramodule package that depends on
+#       the kernel (-nvidia, -r8168, ...), and leaves a same-prefix package that
+#       does NOT depend on it (linux66-rt is a different kernel) alone
+#   27. the IgnorePkg rewrite removes ONLY the evicted kernel's tokens: an
+#       unrelated entry survives, and nothing is ever added
+#   28. the running-kernel guard fires on a VERSION match even when nothing
+#       owns the running kernel's module directory
 #   29. `aur-rebuild-check --fix` runs the pin-check gate before yay, and
 #       `--noconfirm` reaches yay's --rebuild
 #
@@ -676,8 +683,10 @@ fi
 # Pinning the variable makes this case reproducible on every host instead of
 # only on the ones that happen to lack the directory.
 install_kernel_set() {
+    # -nvidia depends on the kernel, as Manjaro's extramodules really do; that
+    # dependency is what marks it for removal alongside the kernel.
     pacman -U --noconfirm "$(mkpkg linux66 "$1")" "$(mkpkg linux66-headers "$1")" \
-        "$(mkpkg linux66-nvidia "$1")" >/dev/null 2>&1
+        "$(mkpkg linux66-nvidia "$1" "linux66")" >/dev/null 2>&1
     sed -i 's|^IgnorePkg.*|IgnorePkg = linux66 linux66-headers linux66-nvidia linux99 linux99-headers linux99-nvidia nvidia-utils lib32-nvidia-utils|' "$CONF"
 }
 
@@ -709,6 +718,60 @@ if [ "$rc" = "0" ] && grep -q 'manjaro-linux99.efi' <<<"$out"; then
     pass "removal exits 0 and still lists the UKIs when the directory exists"
 else
     fail "UKI-present path broken (rc=$rc): $(grep -i 'boot entries' -A2 <<<"$out" | tr '\n' ' ')"
+fi
+
+# =============================================================================
+echo ""
+echo "== 26-27. every extramodule goes; same-prefix strangers and other IgnorePkg entries stay =="
+# =============================================================================
+# Manjaro extramodules are named <kernel>-<module> and depend on <kernel>.
+# Removing only -headers and -nvidia by name meant pacman refused the whole
+# transaction for anyone with -r8168, -zfs or -virtualbox-host-modules. The
+# reverse dependency is the criterion, not the name: linux66-rt shares the
+# prefix but is a different kernel and must be left alone.
+mkenv extramods
+pacman -U --noconfirm "$(mkpkg linux66 6.6.1-1)" "$(mkpkg linux66-headers 6.6.1-1)" \
+    "$(mkpkg linux66-nvidia 6.6.1-1 "linux66")" "$(mkpkg linux66-r8168 6.6.1-1 "linux66=6.6.1")" \
+    "$(mkpkg linux66-rt 6.6.1-1)" "$(mkpkg linux99 9.9.9-1)" >/dev/null 2>&1
+sed -i 's|^IgnorePkg.*|IgnorePkg = linux66 linux66-headers linux66-nvidia linux66-r8168 linux99 keep-me-too|' "$CONF"
+out=$(SAFEUP_UKI_DIR="$ENV_DIR/no-such-uki-dir" remove-versioned-kernel --noconfirm linux66 2>&1); rc=$?
+left=$(pacman -Qq 2>/dev/null | grep -Ex 'linux66(-headers|-nvidia|-r8168)?' | tr '\n' ' ')
+if [ "$rc" = "0" ] && [ -z "$left" ] \
+   && pacman -Qq linux66-rt >/dev/null 2>&1 && pacman -Qq linux99 >/dev/null 2>&1; then
+    pass "kernel, headers, -nvidia and -r8168 removed; linux66-rt (no dependency on linux66) kept"
+else
+    fail "extramodule removal wrong (rc=$rc): left '$left', rt=$(pacman -Qq linux66-rt 2>/dev/null), $(grep -i 'error' <<<"$out" | head -2 | tr '\n' ' ')"
+fi
+ign=$(grep '^IgnorePkg' "$CONF")
+if ! grep -Eq '(^|[[:space:]])linux66(-headers|-nvidia|-r8168)?([[:space:]]|$)' <<<"$ign" \
+   && grep -q 'linux99' <<<"$ign" && grep -q 'keep-me-too' <<<"$ign" \
+   && ! grep -q 'nvidia-utils' <<<"$ign"; then
+    pass "IgnorePkg lost only the evicted kernel's tokens; keep-me-too survived; nothing was added"
+else
+    fail "IgnorePkg rewrite wrong: $ign"
+fi
+
+# =============================================================================
+echo ""
+echo "== 28. the running-kernel guard fires on a version match alone =="
+# =============================================================================
+# `pacman -Qo /usr/lib/modules/$(uname -r)` is one point of failure: the
+# module directory can be unowned (force-removed package, manual install)
+# while that kernel is still the one running. The installed package's version
+# is compared with `uname -r` as a second, independent guard.
+mkenv verguard
+RUNNING=$(uname -r)
+KVER="${RUNNING%-*}"     # 6.18.45-1-MANJARO -> 6.18.45-1 ; 6.8.0-1017-azure -> 6.8.0-1017
+if [[ "$KVER" == *-* ]]; then
+    pacman -U --noconfirm "$(mkpkg linux66 "$KVER")" "$(mkpkg linux99 9.9.9-1)" >/dev/null 2>&1
+    out=$(remove-versioned-kernel --noconfirm linux66 2>&1); rc=$?
+    if [ "$rc" = "3" ] && grep -q 'currently booted' <<<"$out" && pacman -Qq linux66 >/dev/null 2>&1; then
+        pass "refuses a kernel whose version matches uname -r ($RUNNING) with nothing owning the module dir"
+    else
+        fail "version-match guard did not fire (rc=$rc): $(head -2 <<<"$out" | tr '\n' ' ')"
+    fi
+else
+    skip "28: uname -r ($RUNNING) has no <pkgver>-<pkgrel> prefix to build a fixture from"
 fi
 
 # =============================================================================

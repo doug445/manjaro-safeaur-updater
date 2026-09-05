@@ -1,14 +1,18 @@
 #!/bin/bash
 # remove-versioned-kernel — fully evict a Manjaro versioned kernel.
 #
-# Removes <kernel>, <kernel>-headers, <kernel>-nvidia in one transaction.
-# The mkinitcpio remove hook (60-mkinitcpio-remove.hook) reads the kernel's
-# preset before deletion and removes the UKI from /boot/efi/Linux/.
+# Removes <kernel>, <kernel>-headers and every installed <kernel>-* package
+# that depends on <kernel> — the extramodules (-nvidia, -r8168, -zfs,
+# -virtualbox-host-modules, ...) — in one transaction. A same-prefix package
+# that does NOT depend on it, such as the separate linux66-rt kernel, is left
+# alone. The mkinitcpio remove hook (60-mkinitcpio-remove.hook) reads the
+# kernel's preset before deletion and removes the UKI from the ESP.
 # systemd-boot autodiscovers UKIs via BLS Type #2, so the boot entry
 # disappears with the UKI file. DKMS hooks clean built modules.
 #
-# This script ALSO cleans the kernel's three entries from IgnorePkg in
-# /etc/pacman.conf (hook 90 only fires on Install, not Remove).
+# This script ALSO prunes the removed packages' names from IgnorePkg in
+# /etc/pacman.conf (Manjaro's hook only maintains that line on Install).
+# Only those tokens go; every other entry survives, and nothing is ever added.
 #
 # Refuses to remove the currently-booted kernel or to leave the system
 # with zero versioned kernels.
@@ -25,6 +29,7 @@ ARGS=()
 for a in "$@"; do
     case "$a" in
         --noconfirm) ASSUME_YES=1 ;;
+        -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)           ARGS+=("$a") ;;
     esac
 done
@@ -54,11 +59,17 @@ if ! pacman -Qq "$KERNEL" >/dev/null 2>&1; then
     exit 0
 fi
 
-# --- Safety check 2: are we currently booted into it? ---
+# --- Safety check 2: are we currently booted into it? Two independent tests. ---
+# (a) which package owns the running kernel's module directory;
+# (b) whether the installed version is the running version — `uname -r` on a
+#     Manjaro kernel is "<pkgver>-<pkgrel>-MANJARO". The module directory can
+#     be unowned (force-removed package, manual install) while that kernel is
+#     still the one running, and (a) alone would then wave the removal through.
 RUNNING="$(uname -r)"
-# Map running kernel (e.g. 6.6.128-1-MANJARO) to its pkg by checking /usr/lib/modules ownership.
 RUNNING_PKG="$(pacman -Qoq "/usr/lib/modules/${RUNNING}" 2>/dev/null | head -1 || true)"
-if [[ "$RUNNING_PKG" == "$KERNEL" ]]; then
+KVER="$(pacman -Q "$KERNEL" 2>/dev/null | awk '{print $2}')"
+KVER="${KVER#*:}"     # an epoch, if any, never appears in uname -r
+if [[ "$RUNNING_PKG" == "$KERNEL" || "$RUNNING" == "$KVER" || "$RUNNING" == "$KVER-"* ]]; then
     echo "ERROR: refusing to remove $KERNEL — you are currently booted into it ($RUNNING)" >&2
     echo "       reboot into another kernel first, then re-run this script" >&2
     exit 3
@@ -75,20 +86,39 @@ if (( ${#REMAINING[@]} == 0 )); then
     exit 3
 fi
 
-echo "[remove] currently booted: $RUNNING ($RUNNING_PKG)"
-echo "[remove] removing: $KERNEL + $KERNEL-headers + $KERNEL-nvidia"
+# --- Build the package list ---
+# The kernel, its headers (by name: they do not depend on the kernel), and
+# every installed <kernel>-* package that DOES depend on it. The dependency is
+# the criterion, not the name prefix: it is what pacman will refuse the
+# transaction over if left out, and it is what tells a linux66 extramodule
+# apart from the unrelated linux66-rt kernel.
+TO_REMOVE=("$KERNEL")
+if pacman -Qq "$KERNEL-headers" >/dev/null 2>&1; then
+    TO_REMOVE+=("$KERNEL-headers")
+else
+    echo "[remove] note: $KERNEL-headers not installed, skipping"
+fi
+EXTRAMODULES=()
+STRANGERS=()
+while read -r p; do
+    [[ -z "$p" || "$p" == "$KERNEL-headers" ]] && continue
+    deps=$(LC_ALL=C pacman -Qi "$p" 2>/dev/null \
+           | awk '/^Depends On/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }')
+    depends_on_kernel=0
+    for d in $deps; do
+        [[ "${d%%[<>=]*}" == "$KERNEL" ]] && { depends_on_kernel=1; break; }
+    done
+    if (( depends_on_kernel )); then EXTRAMODULES+=("$p"); else STRANGERS+=("$p"); fi
+done < <(pacman -Qq 2>/dev/null | grep -E "^${KERNEL}-" || true)
+TO_REMOVE+=("${EXTRAMODULES[@]}")
+
+echo "[remove] currently booted: $RUNNING (${RUNNING_PKG:-no owning package})"
+echo "[remove] removing: ${TO_REMOVE[*]}"
+for s in "${STRANGERS[@]}"; do
+    echo "[remove] note: $s shares the name prefix but does not depend on $KERNEL — left alone"
+done
 echo "[remove] kernels remaining after this: ${REMAINING[*]}"
 echo
-
-# --- Build the package list (only include what's actually installed) ---
-TO_REMOVE=()
-for p in "$KERNEL" "$KERNEL-headers" "$KERNEL-nvidia"; do
-    if pacman -Qq "$p" >/dev/null 2>&1; then
-        TO_REMOVE+=("$p")
-    else
-        echo "[remove] note: $p not installed, skipping"
-    fi
-done
 
 # --- Confirm ---
 if (( ASSUME_YES )); then
@@ -109,44 +139,49 @@ PACMAN_ARGS=(-Rns)
 (( ASSUME_YES )) && PACMAN_ARGS+=(--noconfirm)
 pacman "${PACMAN_ARGS[@]}" "${TO_REMOVE[@]}"
 
-# --- Clean IgnorePkg ---
-# We rebuild the line from scratch using the surviving kernels + nvidia entries.
-# (Hook 90's sync script only emits linuxNN + linuxNN-headers — it doesn't know
-# about the -nvidia siblings or userspace nvidia-utils. Bypassing it on Remove.)
-# Overridable so the loopback suite can exercise the IgnorePkg rewrite
-# against a throwaway pacman root instead of the real /etc.
+# --- Prune IgnorePkg ---
+# Only the names just removed are taken out, from every IgnorePkg line. An
+# earlier version rebuilt the line from a hardcoded list (survivors plus
+# nvidia userspace), which silently dropped whatever else the user had pinned
+# and added holds nobody asked for. Nothing is added here; a line left with no
+# entries stays as `IgnorePkg =`, which pacman accepts.
+# Overridable so the loopback suite can exercise the rewrite against a
+# throwaway pacman root instead of the real /etc.
 PACMAN_CONF="${SAFEUP_PACMAN_CONF:-/etc/pacman.conf}"
-# Where this system keeps its UKIs. Overridable for the same reason
-# PACMAN_CONF is: the loopback suite has to be able to exercise BOTH the
-# present and the absent case regardless of what the host happens to have.
+# Where this system keeps its UKIs. Overridable for the same reason: the
+# suite has to exercise BOTH the present and the absent case on any host.
 UKI_DIR="${SAFEUP_UKI_DIR:-/boot/efi/Linux}"
-NEW_IGNORE=()
-for k in "${REMAINING[@]}"; do
-    NEW_IGNORE+=("$k" "$k-headers" "$k-nvidia")
-done
-# nvidia userspace must stay held in lockstep — see project_signed_kernel_pipeline.md
-NEW_IGNORE+=(nvidia-utils lib32-nvidia-utils)
-NEW_LINE="IgnorePkg = ${NEW_IGNORE[*]}"
 
-# Locate the existing IgnorePkg line and replace by line number.
-TARGET=$(grep -nE '^IgnorePkg = ' "$PACMAN_CONF" | head -1 | cut -d: -f1)
-if [[ -n "$TARGET" ]]; then
-    BACKUP="$PACMAN_CONF.bak-$(date +%Y%m%d-%H%M%S)"
-    cp "$PACMAN_CONF" "$BACKUP"
-    sed -i "${TARGET}c\\${NEW_LINE}" "$PACMAN_CONF"
-    echo
-    echo "[remove] updated IgnorePkg (line ${TARGET}). Backup: $BACKUP"
-    grep -nE '^IgnorePkg' "$PACMAN_CONF"
+PRUNED=$(mktemp)
+trap 'rm -f "$PRUNED"' EXIT
+awk -v remove="${TO_REMOVE[*]}" '
+    BEGIN { n = split(remove, r, " "); for (i = 1; i <= n; i++) del[r[i]] = 1 }
+    /^[[:space:]]*IgnorePkg[[:space:]]*=/ {
+        eq = index($0, "="); lhs = substr($0, 1, eq); rhs = substr($0, eq + 1)
+        m = split(rhs, t, /[[:space:]]+/); out = ""
+        for (i = 1; i <= m; i++) if (t[i] != "" && !(t[i] in del)) out = out " " t[i]
+        print lhs out; next
+    }
+    { print }' "$PACMAN_CONF" > "$PRUNED"
+if cmp -s "$PRUNED" "$PACMAN_CONF"; then
+    echo "[remove] IgnorePkg in $PACMAN_CONF names none of the removed packages — left as-is"
 else
-    echo "[remove] WARNING: no IgnorePkg line found in $PACMAN_CONF — leaving as-is"
+    BACKUP="$PACMAN_CONF.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$PACMAN_CONF" "$BACKUP"
+    cat "$PRUNED" > "$PACMAN_CONF"      # in place, so mode and owner are kept
+    echo
+    echo "[remove] IgnorePkg pruned of: ${TO_REMOVE[*]}. Backup: $BACKUP"
+    grep -nE '^[[:space:]]*IgnorePkg' "$PACMAN_CONF" || true
 fi
 
 # --- Verify state ---
 echo
 echo "=== verification ==="
 echo
-echo "1) Package gone:"
-pacman -Qq "$KERNEL" 2>/dev/null && echo "  WARNING: $KERNEL still installed" || echo "  ok: $KERNEL not installed"
+echo "1) Packages gone:"
+for p in "${TO_REMOVE[@]}"; do
+    pacman -Qq "$p" >/dev/null 2>&1 && echo "  WARNING: $p still installed" || echo "  ok: $p not installed"
+done
 echo
 echo "2) UKI gone (should not exist):"
 found_uki=0
