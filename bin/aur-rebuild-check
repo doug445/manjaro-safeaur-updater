@@ -1,43 +1,58 @@
 #!/bin/bash
-# aur-rebuild-check — find AUR packages with broken library links.
+# aur-rebuild-check — find AUR packages that no longer fit the libraries and
+# interpreters installed under them.
 #
 # After Manjaro bumps a core runtime (python, openssl, glibc, icu, etc.),
-# AUR packages built against the old soname can't find their libs and
-# break at runtime. This scans every AUR-installed ELF file for
-# "=> not found" references and prints the packages needing rebuild.
+# AUR packages built against the old version still look installed to pacman
+# and break at runtime. Two things are checked for every `pacman -Qmq` package:
+#
+#   1. Every ELF object it owns is run through `ldd`; a `=> not found`
+#      DT_NEEDED is a break. ELF is recognised by its magic bytes, not by file
+#      name: /opt/<app>/<exe> and /usr/lib/<app>/<helper> are where a great
+#      many AUR packages keep their binaries, and a scan keyed on `*.so*` or
+#      `bin/` never opened them.
+#   2. Any file it owns under /usr/lib/python3.X/ for an X that is not the
+#      installed python's. A pure-Python package stranded in the previous
+#      interpreter's site-packages has no ELF to fail — it is simply never
+#      imported again — and pacman sees nothing wrong with it. This is the
+#      single most common post-upgrade AUR breakage on Manjaro.
 #
 # A bare "=> not found" is NOT always a real break. Two false positives
 # are filtered out (otherwise -bin packages like cloudflare-warp-bin get
 # flagged forever — rebuilding a prebuilt repack can never change them):
-#   1. Privately-bundled libs. Flutter/Electron-style apps ship their own
+#   a. Privately-bundled libs. Flutter/Electron-style apps ship their own
 #      libs in a private dir and load them via an $ORIGIN RPATH on the main
 #      executable. Standalone `ldd` on a plugin .so can't replay that, so it
 #      reports the sibling lib as "not found". If the package itself ships a
 #      file with that soname, it resolves at runtime → not a break.
-#   2. Optional / absent-by-design deps (e.g. libjvm.so for WARP's unused
+#   b. Optional / absent-by-design deps (e.g. libjvm.so for WARP's unused
 #      Dart-JNI plugin). Listed in $ignore_sonames below.
 #
 # Usage:
-#   aur-rebuild-check         # scan + report (exit 1 if any need rebuild)
-#   aur-rebuild-check --fix   # prompt before running yay -S --rebuild
-#   aur-rebuild-check --quiet # no output if nothing to do (for cron)
+#   aur-rebuild-check                   # scan + report (exit 1 if any need rebuild)
+#   aur-rebuild-check --fix             # offer `yay -S --rebuild` for the set — after
+#                                       # aur-pin-check has passed every package in it
+#   aur-rebuild-check --fix --noconfirm # no prompt; --noconfirm is forwarded to yay
+#   aur-rebuild-check --quiet           # no output if nothing to do (for cron)
 #
 # Env:
 #   AUR_REBUILD_IGNORE_SONAMES   space-separated extra sonames to ignore
 #
-# Exit: 0 if clean, 1 if rebuilds needed, 2 on error.
+# Exit: 0 if clean, 1 if rebuilds needed (or --fix was refused by the gate),
+#       2 on error.
 
 set -uo pipefail
 
 mode=scan
 quiet=0
+assume_yes=0
 for arg in "$@"; do
     case "$arg" in
-        --fix)   mode=fix ;;
-        --quiet) quiet=1 ;;
-        -h|--help)
-            sed -n '2,14p' "$0" | sed 's/^# \?//'
-            exit 0 ;;
+        --fix)       mode=fix ;;
+        --quiet)     quiet=1 ;;
+        --noconfirm) assume_yes=1 ;;
+        -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "[aur-rebuild] unknown option: $arg (try --help)" >&2; exit 2 ;;
     esac
 done
 
@@ -57,6 +72,27 @@ is_ignored_soname() {
     return 1
 }
 
+# ELF by magic, with a builtin: four bytes read by the shell itself, no fork
+# per file. A script or a data file is rejected here without ever starting
+# ldd for it (which would print "not a dynamic executable" and cost a loader
+# start every time). LC_ALL=C so -n counts bytes, not multibyte characters.
+is_elf() {
+    local m=""
+    # Redirections apply left to right: stderr must be silenced BEFORE the
+    # input redirect is attempted, or an unreadable file (a root-only config
+    # owned by the package) prints a "Permission denied" from the shell.
+    LC_ALL=C IFS= read -r -n 4 -d '' m 2>/dev/null < "$1"
+    [[ "$m" == $'\x7fELF' ]]
+}
+
+# The directory the installed python owns — "python3.13" for python 3.13.x.
+# Empty when python is not installed, which switches check 2 off.
+py_cur=""
+if v=$(pacman -Q python 2>/dev/null | awk '{print $2}') && [[ -n "$v" ]]; then
+    IFS=. read -r maj min _ <<<"${v#*:}"
+    [[ -n "$maj" && -n "$min" ]] && py_cur="python$maj.$min"
+fi
+
 aur_pkgs=()
 while read -r p; do aur_pkgs+=("$p"); done < <(pacman -Qmq 2>/dev/null)
 
@@ -65,9 +101,10 @@ if (( ${#aur_pkgs[@]} == 0 )); then
     exit 0
 fi
 
-msg "scanning ${#aur_pkgs[@]} AUR package(s) for broken .so links..."
+msg "scanning ${#aur_pkgs[@]} AUR package(s) for broken .so links and stale interpreter dirs..."
 
 need_rebuild=()
+reasons=()
 for pkg in "${aur_pkgs[@]}"; do
     # Files this package ships, by basename — so we can tell whether a
     # "not found" soname is actually a lib the package bundles itself
@@ -76,23 +113,36 @@ for pkg in "${aur_pkgs[@]}"; do
     unset pkg_basenames; declare -A pkg_basenames
     while read -r pf; do base="${pf##*/}"; [[ -n "$base" ]] && pkg_basenames["$base"]=1; done <<<"$pkg_files"
 
-    pkg_broken=0
-    while read -r f; do
-        [[ -f "$f" && -r "$f" ]] || continue
-        # Skip obvious non-binaries: only .so* files and anything in bin/.
-        # ldd on scripts prints "not a dynamic executable" to stderr —
-        # silenced with 2>/dev/null.
+    reason=""
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        # Check 2: a file under another interpreter's tree. Path-based, nothing
+        # is opened. pacman -Qlq may print RootDir-prefixed paths, so the match
+        # is not anchored on the left.
+        if [[ -n "$py_cur" && "$f" =~ /usr/lib/(python3\.[0-9]+)/ \
+              && "${BASH_REMATCH[1]}" != "$py_cur" ]]; then
+            reason="files under /usr/lib/${BASH_REMATCH[1]}/ — the installed interpreter is $py_cur"
+            break
+        fi
+        # Check 1: an ELF whose DT_NEEDED does not resolve. Regular files only:
+        # a symlink's target is scanned under its own name if this package owns
+        # it, and is another package's problem if it does not.
+        [[ -f "$f" && ! -L "$f" && -s "$f" && -r "$f" ]] || continue
+        is_elf "$f" || continue
         while read -r soname; do
             [[ -n "$soname" ]] || continue
             [[ -n "${pkg_basenames[$soname]:-}" ]] && continue  # bundled → $ORIGIN-resolved
             is_ignored_soname "$soname" && continue              # optional/absent-by-design
-            pkg_broken=1
+            reason="$soname not found (needed by $f)"
             break
-        done < <(ldd -- "$f" 2>/dev/null | awk '/=> not found/{print $1}')
-        (( pkg_broken )) && break
-    done < <(printf '%s\n' "$pkg_files" | grep -E '(\.so(\.|$)|/bin/[^/]+$)')
+        done < <(LC_ALL=C ldd -- "$f" 2>/dev/null | awk '/=> not found/{print $1}')
+        [[ -n "$reason" ]] && break
+    done <<<"$pkg_files"
 
-    (( pkg_broken )) && need_rebuild+=("$pkg")
+    if [[ -n "$reason" ]]; then
+        need_rebuild+=("$pkg")
+        reasons+=("$reason")
+    fi
 done
 
 if (( ${#need_rebuild[@]} == 0 )); then
@@ -102,14 +152,42 @@ fi
 
 # Always print results, even in quiet mode — silence was only for the header.
 printf '[aur-rebuild] %d AUR package(s) need rebuild:\n' "${#need_rebuild[@]}" >&2
-printf '  %s\n' "${need_rebuild[@]}" >&2
+for i in "${!need_rebuild[@]}"; do
+    printf '  %s — %s\n' "${need_rebuild[$i]}" "${reasons[$i]}" >&2
+done
 echo >&2
 printf '[aur-rebuild] fix: yay -S --rebuild %s\n' "${need_rebuild[*]}" >&2
 
 if [[ "$mode" == fix ]]; then
-    read -r -p "Rebuild now? [y/N] " yn
-    if [[ "$yn" == [yY]* ]]; then
-        yay -S --rebuild "${need_rebuild[@]}"
+    # A rebuild is an install, and goes through the same gate as aurinstall.
+    # Rebuilding a package whose PKGBUILD has since grown an unpinned VCS
+    # source would be exactly the hole the gate exists to close, reached
+    # through a side door labelled "maintenance".
+    if ! command -v aur-pin-check >/dev/null 2>&1; then
+        echo "[aur-rebuild] --fix needs aur-pin-check on PATH; refusing to rebuild ungated" >&2
+        exit 2
+    fi
+    if ! aur-pin-check "${need_rebuild[@]}"; then
+        echo "" >&2
+        echo "[aur-rebuild] refusing to rebuild: the pin-check rejected one or more of these." >&2
+        echo "[aur-rebuild] override, once you have vetted the PKGBUILD: yay -S --rebuild ${need_rebuild[*]}" >&2
+        exit 1
+    fi
+    go=0
+    if (( assume_yes )); then
+        go=1
+    elif { : </dev/tty; } 2>/dev/null; then
+        # The prompt reads the terminal directly: this runs at the tail of
+        # `safeup`, whose stdin may be a pipe when chained from an alias.
+        read -r -p "[aur-rebuild] rebuild now with yay? [y/N] " yn </dev/tty || yn=n
+        [[ "$yn" == [yY]* ]] && go=1
+    else
+        msg "no terminal — not rebuilding (pass --noconfirm to rebuild unattended)"
+    fi
+    if (( go )); then
+        yay_args=(-S --rebuild)
+        (( assume_yes )) && yay_args+=(--noconfirm)
+        yay "${yay_args[@]}" "${need_rebuild[@]}"
         exit $?
     fi
 fi

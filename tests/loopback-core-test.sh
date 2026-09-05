@@ -81,6 +81,12 @@
 #       the entire suite's safety argument rests on, and it is an assumption
 #       about pacman rather than about this code, so nothing here would notice
 #       if it silently changed.
+#   24. aur-rebuild-check flags a broken ELF that is neither *.so nor under
+#       bin/ — /opt/<app>/<exe> is where a great many AUR packages live
+#   25. it flags a pure-Python package stranded in the PREVIOUS interpreter's
+#       site-packages after a python bump, and not one under the current dir
+#   29. `aur-rebuild-check --fix` runs the pin-check gate before yay, and
+#       `--noconfirm` reaches yay's --rebuild
 #
 # Run as root:  sudo bash tests/loopback-core-test.sh
 # Requires: pacman, repo-add, bsdtar (libarchive), losetup, mkfs.ext4, cc.
@@ -176,7 +182,10 @@ exec /usr/bin/pacman --config "$CONF" "\$@"
 SHIMEOF
     printf '#!/bin/bash\nexec /usr/bin/pacman-conf --config "%s" "$@"\n' "$CONF" > "$SHIM/pacman-conf"
     printf '#!/bin/bash\nexec "$@"\n' > "$SHIM/sudo"
+    # yay stub: records its argv so the --fix path can prove what reached it.
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$ENV_DIR/yay.log" > "$SHIM/yay"
     chmod +x "$SHIM"/*
+    : > "$ENV_DIR/yay.log"
 
     export PATH="$SHIM:$BIN:$BASE_PATH"
     export SAFEUP_PACMAN_CONF="$CONF"
@@ -184,13 +193,15 @@ SHIMEOF
     : > "$SAFEUP_LOG"
 }
 
-# mkpkg <name> <ver-rel> [--files f1,f2] [dep ...]  → prints the package path
+# mkpkg <name> <ver-rel> [--at <subdir>] [--files f1,f2] [dep ...]
+#   → prints the package path. Files land under usr/lib unless --at says where.
 mkpkg() {
     local name="$1" ver="$2"; shift 2
-    local files=""
+    local files="" at="usr/lib"
+    if [ "${1:-}" = "--at" ]; then at="$2"; shift 2; fi
     if [ "${1:-}" = "--files" ]; then files="$2"; shift 2; fi
     local d="$ENV_DIR/build/$name-$ver"
-    rm -rf "$d"; mkdir -p "$d/usr/lib"
+    rm -rf "$d"; mkdir -p "$d/$at"
     {
         echo "pkgname = $name"; echo "pkgbase = $name"; echo "pkgver = $ver"
         echo "pkgdesc = SafeAUR loopback fixture"
@@ -201,11 +212,14 @@ mkpkg() {
     } > "$d/.PKGINFO"
     if [ -n "$files" ]; then
         local IFS=,
-        for f in $files; do install -Dm644 "$f" "$d/usr/lib/$(basename "$f")"; done
+        for f in $files; do install -Dm644 "$f" "$d/$at/$(basename "$f")"; done
     else
-        echo "$name $ver" > "$d/usr/lib/$name.marker"
+        echo "$name $ver" > "$d/$at/$name.marker"
     fi
-    ( cd "$d" && bsdtar -czf "$ENV_DIR/build/$name-$ver-$ARCH.pkg.tar.gz" .PKGINFO usr )
+    # `--` must precede the first file name: bsdtar stops parsing options at
+    # the first non-option and would otherwise try to archive a file named "--".
+    ( cd "$d" && bsdtar -czf "$ENV_DIR/build/$name-$ver-$ARCH.pkg.tar.gz" -- .PKGINFO * ) \
+        || echo "mkpkg: bsdtar failed for $name-$ver" >&2
     echo "$ENV_DIR/build/$name-$ver-$ARCH.pkg.tar.gz"
 }
 
@@ -415,6 +429,74 @@ if [ "$rc" = "0" ] && grep -q 'satisfied library links' <<<"$out"; then
     pass "a package whose links all resolve is reported clean, exit 0"
 else
     fail "clean package not reported clean (rc=$rc): $out"
+fi
+
+# 24. A broken executable that is neither *.so nor under a bin/ directory.
+# /opt/<app>/<exe> is the layout of a large share of AUR packages, and a scan
+# keyed on file NAME never opened it. ELF is identified by magic now.
+pacman -R --noconfirm cleanapp >/dev/null 2>&1
+echo 'int dep_fn(void); int main(void){return dep_fn();}' > "$ELF/app.c"
+cc -o "$ELF/app" "$ELF/app.c" -L"$ELF" -l:libdep.so 2>/dev/null
+if [ -x "$ELF/app" ] && ldd "$ELF/app" 2>/dev/null | grep -q 'libdep.so => not found'; then
+    pacman -U --noconfirm "$(mkpkg optapp 1.0-1 --at opt/optapp --files "$ELF/app")" >/dev/null 2>&1
+    out=$(aur-rebuild-check 2>&1); rc=$?
+    if [ "$rc" = "1" ] && grep -q 'optapp' <<<"$out"; then
+        pass "a broken ELF under /opt/<app>/ (not *.so, not bin/) is flagged"
+    else
+        fail "ELF outside *.so and bin/ was not scanned (rc=$rc): $out"
+    fi
+    pacman -R --noconfirm optapp >/dev/null 2>&1
+else
+    skip "24: could not build a dynamically linked executable with a missing DT_NEEDED here"
+fi
+
+# 25. A pure-Python package after a python bump. There is no ELF to scan; the
+# files simply sit in a directory the new interpreter never looks at, and to
+# pacman nothing is wrong. The current version comes from `pacman -Q python`.
+pacman -U --noconfirm "$(mkpkg python 3.13.1-1)" >/dev/null 2>&1
+echo 'x = 1' > "$ELF/mod.py"
+pacman -U --noconfirm \
+    "$(mkpkg oldpy 1.0-1 --at usr/lib/python3.12/site-packages --files "$ELF/mod.py")" \
+    "$(mkpkg newpy 1.0-1 --at usr/lib/python3.13/site-packages --files "$ELF/mod.py")" >/dev/null 2>&1
+out=$(aur-rebuild-check 2>&1); rc=$?
+if [ "$rc" = "1" ] && grep -q 'oldpy' <<<"$out" && grep -q 'python3.12' <<<"$out"; then
+    pass "package under the previous interpreter's site-packages is flagged, naming the stale dir"
+else
+    fail "stale python3.12 site-packages not flagged (rc=$rc): $out"
+fi
+grep -q 'newpy' <<<"$out" \
+    && fail "package under the CURRENT python3.13 dir was flagged" \
+    || pass "package under the current interpreter's site-packages is not flagged"
+pacman -R --noconfirm oldpy newpy python >/dev/null 2>&1
+
+# 29. --fix must not become a way around the gate: a rebuild goes through
+# aur-pin-check first, and only a clean set reaches yay. .SRCINFO comes from a
+# local file here, exactly as the fixture suite does it.
+if [ -f "$ELF/libmain.so" ] && curl -V 2>/dev/null | grep -q '\bfile\b'; then
+    pacman -U --noconfirm "$ENV_DIR/build/brokenapp-1.0-1-$ARCH.pkg.tar.gz" >/dev/null 2>&1
+    export AUR_SRCINFO_URL="file://$ENV_DIR/%s.SRCINFO" AUR_RPC_URL="file://$ENV_DIR/%s.json"
+    printf 'pkgbase = brokenapp\n\tsource = git+https://example.invalid/b.git\n\npkgname = brokenapp\n' \
+        > "$ENV_DIR/brokenapp.SRCINFO"
+    : > "$ENV_DIR/yay.log"
+    out=$(aur-rebuild-check --fix --noconfirm 2>&1); rc=$?
+    if [ "$rc" != "0" ] && grep -q 'REJECT brokenapp' <<<"$out" && [ ! -s "$ENV_DIR/yay.log" ]; then
+        pass "--fix refuses to rebuild a package the pin-check rejects; yay never runs"
+    else
+        fail "--fix bypassed the gate (rc=$rc, yay: $(cat "$ENV_DIR/yay.log"))"
+    fi
+    printf 'pkgbase = brokenapp\n\tsource = git+https://example.invalid/b.git#commit=0123456789abcdef0123456789abcdef01234567\n\npkgname = brokenapp\n' \
+        > "$ENV_DIR/brokenapp.SRCINFO"
+    : > "$ENV_DIR/yay.log"
+    aur-rebuild-check --fix --noconfirm >/dev/null 2>&1
+    if grep -q -- '-S --rebuild --noconfirm brokenapp' "$ENV_DIR/yay.log"; then
+        pass "--fix --noconfirm reaches 'yay -S --rebuild --noconfirm' for a pinned package"
+    else
+        fail "--fix did not rebuild a clean package: $(cat "$ENV_DIR/yay.log")"
+    fi
+    unset AUR_SRCINFO_URL AUR_RPC_URL
+    pacman -R --noconfirm brokenapp >/dev/null 2>&1
+else
+    skip "29: needs the broken ELF from 9-11 and a curl with file:// support"
 fi
 
 # =============================================================================
