@@ -14,6 +14,23 @@
 # Foreign repos are auto-detected from pacman.conf: anything not in
 # core/extra/multilib (and their *-testing variants).
 #
+# What "satisfiable" means. A pending package is judged by the copy pacman
+# will actually install: the first repository in pacman.conf order that
+# carries the name — a Manjaro repo, if one has it, even when a foreign repo
+# has it too. A foreign package is held when one of its version-constrained
+# dependencies is satisfied neither by what is installed (`pacman -T`) nor by
+# a package this same upgrade will bring in (`pacman -Sddp` against the fresh
+# sync databases). The second half matters: Manjaro's libfoo 2.0 and the
+# foreign package rebuilt against it usually arrive in the SAME sync, and
+# `pacman -T` alone held every one of those for a cycle.
+#
+# The pre-flight never refreshes the real sync database. Refreshing it and
+# then not upgrading — a declined prompt, or --check — is the textbook
+# partial-upgrade setup: the next `pacman -S foo` installs against a database
+# newer than the system. The refresh goes to a private snapshot instead, the
+# way checkupdates(8) does it; the real `pacman -Syu` then refreshes and
+# upgrades in one transaction.
+#
 # Prompt model: ONE master y/n, then pacman runs --noconfirm. Two
 # recovery paths if pacman fails:
 #   - "unresolvable package conflicts" → re-run interactively so [y/N]
@@ -25,6 +42,14 @@
 # Usage:
 #   safeup                # full flow (one master y/n, then unattended)
 #   safeup --noconfirm    # skip the master prompt; forwarded to pacman
+#   safeup --check        # pre-flight only: list pending upgrades and the
+#                         # holds a real run would make; change nothing. No
+#                         # root (fakeroot refreshes the private snapshot).
+#                         # Exit 0 = upgrades pending, 2 = none, 1 = error.
+#   safeup --aur          # after a clean repo upgrade, run aurupdate (AUR
+#                         # upgrades behind the pin-check gate) before the
+#                         # rebuild scan: the whole update in one command
+#   anything else is forwarded to pacman -Syu
 #
 # Log: /var/log/safeup.log
 
@@ -34,10 +59,31 @@ LOG="${SAFEUP_LOG:-/var/log/safeup.log}"
 MANJARO_REPOS=(core extra multilib community core-testing extra-testing multilib-testing)
 
 msg() { printf '[safeup] %s\n' "$*" >&2; }
+die() { printf '[safeup] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Single master prompt. Skipped if caller already passed --noconfirm.
+check_mode=0
+run_aur=0
+noconfirm=0
+pacman_args=()
+for a in "$@"; do
+    case "$a" in
+        --check)     check_mode=1 ;;
+        --aur)       run_aur=1 ;;
+        --noconfirm) noconfirm=1; pacman_args+=("$a") ;;
+        -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)           pacman_args+=("$a") ;;
+    esac
+done
+
+is_manjaro_repo() {
+    local r="$1" m
+    for m in "${MANJARO_REPOS[@]}"; do [[ "$r" == "$m" ]] && return 0; done
+    return 1
+}
+
+# Single master prompt. Skipped if caller passed --noconfirm.
 confirm_proceed() {
-    for a in "$@"; do [[ "$a" == "--noconfirm" ]] && return 0; done
+    (( noconfirm )) && return 0
     local ans
     read -r -p "[safeup] proceed with pacman -Syu? [Y/n] " ans </dev/tty
     case "$ans" in n|N|no|No) msg "aborted by user"; exit 1 ;; esac
@@ -148,63 +194,106 @@ run_pacman_syu() {
     return "$rc"
 }
 
-msg "refreshing sync databases..."
-sudo pacman -Sy || { msg "pacman -Sy failed"; exit 1; }
+# --- private sync-database snapshot -----------------------------------------
+# A scratch DBPath: local/ is a symlink to the real local database (what is
+# installed), sync/ is fetched fresh. Every pre-flight query below runs
+# against it, and the real database is not written to at all. pacman insists
+# on root for -Sy whatever the DBPath, hence fakeroot — the same trick
+# checkupdates(8) relies on.
+SNAP=""
+PDB=()
+trap '[[ -n "$SNAP" ]] && rm -rf "$SNAP"' EXIT
 
-# Discover foreign repos.
-mapfile -t foreign_repos < <(
-    pacman-conf --repo-list | while read -r r; do
-        skip=0
-        for m in "${MANJARO_REPOS[@]}"; do
-            [[ "$r" == "$m" ]] && { skip=1; break; }
+snapshot_sync() {
+    SNAP=$(mktemp -d -t safeup-db.XXXXXX) || die "mktemp failed"
+    # sync/ is created here, as us, so a root-run refresh cannot leave behind
+    # a directory the EXIT trap then cannot remove.
+    mkdir -p "$SNAP/sync"
+    ln -s "$(pacman-conf DBPath)/local" "$SNAP/local"
+    PDB=(--dbpath "$SNAP")
+    local -a cmd=(pacman -Sy "${PDB[@]}" --logfile /dev/null)
+    # pacman 7 sandboxes its downloader; the filesystem half has to be told
+    # about a DBPath outside the configured one (checkupdates does the same).
+    pacman -Sh 2>&1 | grep -q -- '--disable-sandbox-filesystem' && cmd+=(--disable-sandbox-filesystem)
+    msg "refreshing a private copy of the sync databases (the real one is untouched)..."
+    if (( EUID == 0 )); then
+        "${cmd[@]}" >/dev/null
+    elif command -v fakeroot >/dev/null 2>&1; then
+        fakeroot -- "${cmd[@]}" >/dev/null
+    elif (( check_mode )); then
+        die "--check needs fakeroot (package: fakeroot, part of base-devel) to refresh a database copy without root"
+    else
+        sudo "${cmd[@]}" >/dev/null
+    fi || die "could not refresh the sync databases"
+}
+
+# --- pre-flight ---------------------------------------------------------------
+# Is this depstring satisfied now, or will it be by this same upgrade?
+dep_satisfiable() {
+    pacman "${PDB[@]}" -T -- "$1" >/dev/null 2>&1 && return 0
+    LC_ALL=C pacman "${PDB[@]}" -Sddp --noconfirm --print-format '%n' -- "$1" >/dev/null 2>&1
+}
+
+pending=()
+hold=()
+hold_why=()
+preflight() {
+    local line pkg info repo deps d checked=0
+    # "[ignored]" lines are packages pacman will not touch anyway.
+    mapfile -t pending < <(LC_ALL=C pacman "${PDB[@]}" -Qu 2>/dev/null | grep -v '\[.*\]')
+    (( ${#pending[@]} > 0 && ${#foreign_repos[@]} > 0 )) || return 0
+    for line in "${pending[@]}"; do
+        pkg=${line%% *}
+        # -Si prints one block per repository carrying the name, in
+        # pacman.conf order; the FIRST is the copy -Syu installs. Judge that.
+        info=$(LC_ALL=C pacman "${PDB[@]}" -Si -- "$pkg" 2>/dev/null | awk 'BEGIN{RS=""} NR==1')
+        repo=$(awk -F': *' '/^Repository/ {print $2; exit}' <<<"$info")
+        [[ -n "$repo" ]] || continue
+        is_manjaro_repo "$repo" && continue
+        checked=$((checked + 1))
+        # The whole value after the first ': ' — an epoch's colon survives.
+        deps=$(awk '/^Depends On/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' <<<"$info")
+        [[ -z "$deps" || "$deps" == "None" ]] && continue
+        for d in $deps; do
+            [[ "$d" == *[\<\>=]* ]] || continue
+            dep_satisfiable "$d" && continue
+            msg "  hold $pkg ($repo) — unsatisfied dep: $d"
+            hold+=("$pkg"); hold_why+=("$d")
+            break
         done
-        (( skip )) || echo "$r"
     done
+    msg "checked $checked pending foreign upgrade(s) for ABI safety"
+}
+
+# --- main -----------------------------------------------------------------------
+mapfile -t foreign_repos < <(
+    pacman-conf --repo-list | while read -r r; do is_manjaro_repo "$r" || echo "$r"; done
 )
 
-if (( ${#foreign_repos[@]} == 0 )); then
+ignore_args=()
+if (( ${#foreign_repos[@]} == 0 && check_mode == 0 )); then
     msg "no foreign repos configured — passing through to plain pacman -Syu"
-    confirm_proceed "$@"
-    run_pacman_syu "$@"
-    pac_rc=$?
 else
-    msg "foreign repos tracked: ${foreign_repos[*]}"
+    (( ${#foreign_repos[@]} > 0 )) && msg "foreign repos tracked: ${foreign_repos[*]}"
+    snapshot_sync
+    preflight
 
-    # Build {pkg -> repo} map across all foreign repos.
-    declare -A foreign_pkg_repo=()
-    for repo in "${foreign_repos[@]}"; do
-        while read -r r name _; do
-            foreign_pkg_repo["$name"]="$r"
-        done < <(pacman -Sl "$repo" 2>/dev/null)
-    done
-
-    # Pending upgrades intersected with foreign repos.
-    candidates=()
-    while read -r pkg _; do
-        [[ -n "${foreign_pkg_repo[$pkg]:-}" ]] && candidates+=("$pkg")
-    done < <(pacman -Qu 2>/dev/null || true)
-
-    hold=()
-    if (( ${#candidates[@]} > 0 )); then
-        msg "checking ${#candidates[@]} pending foreign upgrade(s) for ABI safety..."
-        for pkg in "${candidates[@]}"; do
-            repo="${foreign_pkg_repo[$pkg]}"
-            deps=$(LC_ALL=C pacman -Si "$repo/$pkg" 2>/dev/null \
-                   | awk -F': *' '/^Depends On/ {print $2; exit}')
-            [[ -z "$deps" || "$deps" == "None" ]] && continue
-
-            for d in $deps; do
-                [[ "$d" == *[\<\>=]* ]] || continue
-                if ! pacman -T "$d" >/dev/null 2>&1; then
-                    msg "  hold $pkg ($repo) — unsatisfied dep: $d"
-                    hold+=("$pkg")
-                    break
-                fi
+    if (( check_mode )); then
+        if (( ${#pending[@]} == 0 )); then
+            msg "nothing pending"
+            exit 2
+        fi
+        msg "${#pending[@]} upgrade(s) pending; would hold: ${hold[*]:-none}"
+        for line in "${pending[@]}"; do
+            pkg=${line%% *}; why=""
+            for i in "${!hold[@]}"; do
+                [[ "${hold[$i]}" == "$pkg" ]] && { why="    [would hold: ${hold_why[$i]}]"; break; }
             done
+            echo "$line$why"
         done
+        exit 0
     fi
 
-    ignore_args=()
     if (( ${#hold[@]} > 0 )); then
         msg "holding ${#hold[@]} package(s) until Manjaro catches up"
         joined=$(IFS=,; echo "${hold[*]}")
@@ -216,20 +305,37 @@ else
     else
         msg "no ABI conflicts — all foreign upgrades safe to apply"
     fi
-
-    # -Syu (not -Su) so the upgrade atomically re-refreshes the DB —
-    # closes the partial-upgrade window if the user aborts between the
-    # initial -Sy (for dep analysis) and this call.
-    msg "running pacman -Syu ${ignore_args[*]-}"
-    confirm_proceed "$@"
-    run_pacman_syu "${ignore_args[@]}" "$@"
-    pac_rc=$?
 fi
 
-# Post-upgrade: AUR rebuild sanity check.
+# -Syu: the real refresh happens here, in the same transaction as the upgrade.
+msg "running pacman -Syu ${ignore_args[*]-}"
+confirm_proceed
+run_pacman_syu "${ignore_args[@]}" "${pacman_args[@]}"
+pac_rc=$?
+
+# --- post-upgrade ---------------------------------------------------------------
+# AUR upgrades only after a CLEAN repo upgrade: building AUR packages on top
+# of a failed one links them against whatever half-state was left behind.
+aur_rc=0
+if (( pac_rc == 0 && run_aur )); then
+    if command -v aurupdate >/dev/null 2>&1; then
+        echo
+        msg "repo upgrade clean — running aurupdate"
+        aur_args=()
+        (( noconfirm )) && aur_args+=(--noconfirm)
+        aurupdate "${aur_args[@]}"
+        aur_rc=$?
+    else
+        msg "--aur: aurupdate is not on PATH — AUR upgrades skipped"
+        aur_rc=1
+    fi
+fi
+
+# AUR rebuild sanity check, last, so it sees the AUR upgrades too.
 if (( pac_rc == 0 )) && command -v aur-rebuild-check >/dev/null 2>&1; then
     echo
     aur-rebuild-check || true
 fi
 
-exit "$pac_rc"
+(( pac_rc != 0 )) && exit "$pac_rc"
+exit "$aur_rc"

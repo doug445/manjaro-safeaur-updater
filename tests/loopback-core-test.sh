@@ -81,6 +81,19 @@
 #       the entire suite's safety argument rests on, and it is an assumption
 #       about pacman rather than about this code, so nothing here would notice
 #       if it silently changed.
+#   20. NO false hold when the satisfying dependency is pending in the SAME
+#       run — Manjaro's libfoo 2.0 and the foreign package built against it
+#       usually land together, and `pacman -T` alone (installed packages only)
+#       held every one of those for a cycle
+#   21. NO false hold for a package present in both a Manjaro repo and a
+#       foreign one: pacman upgrades from the first repo in pacman.conf order,
+#       so it is judged by THAT repo's dependencies, not the foreign copy's
+#   22. `--check` reports pending upgrades and would-be holds, changes nothing,
+#       and the REAL sync database is never refreshed by the pre-flight — the
+#       refresh goes to a private snapshot, so declining the prompt cannot
+#       leave `pacman -S foo` one bare -Sy away from a partial upgrade
+#   23. a dependency with an epoch (`libfoo>=1:2.0`) is read whole — splitting
+#       the -Si line on ':' truncated it to `libfoo>=1`, which then passed
 #   24. aur-rebuild-check flags a broken ELF that is neither *.so nor under
 #       bin/ — /opt/<app>/<exe> is where a great many AUR packages live
 #   25. it flags a pure-Python package stranded in the PREVIOUS interpreter's
@@ -369,6 +382,106 @@ safeup --noconfirm </dev/null >/dev/null 2>&1; rc=$?
 [ "$(installed_ver widget)" = "1.0-1" ] \
     && pass "nothing was upgraded by the failed transaction" \
     || fail "widget changed version during a failed run"
+
+# =============================================================================
+echo ""
+echo "== 20. no false hold when the satisfying dependency lands in the SAME run =="
+# =============================================================================
+# The common case, not the edge case: Manjaro's libq 2.0 and blackarch's toolq
+# rebuilt against it arrive in the same sync. `pacman -T` sees only what is
+# installed, so on its own it held every one of these for a cycle. The guard
+# has to ask whether the dependency will be satisfiable after THIS upgrade.
+mkenv samerun blackarch
+publish "$REPO_M" extra "$(mkpkg libq 1.0-1)"
+LIBQ1="$ENV_DIR/build/libq-1.0-1-$ARCH.pkg.tar.gz"
+TOOLQ1=$(mkpkg toolq 1.0-1 "libq>=1.0")
+pacman -U --noconfirm "$LIBQ1" "$TOOLQ1" >/dev/null 2>&1
+publish "$REPO_M" extra "$(mkpkg libq 2.0-1)"
+publish "$REPO_F" blackarch "$(mkpkg toolq 2.0-1 "libq>=2.0")"
+out=$(safeup --noconfirm </dev/null 2>&1); rc=$?
+if ! grep -q 'hold toolq' <<<"$out" && [ "$(installed_ver toolq)" = "2.0-1" ] \
+   && [ "$(installed_ver libq)" = "2.0-1" ]; then
+    pass "toolq NOT held: its libq>=2.0 is satisfied by the libq 2.0 pending in the same run"
+else
+    fail "false hold on a same-run dependency (rc=$rc): toolq=$(installed_ver toolq) libq=$(installed_ver libq)"
+fi
+
+# =============================================================================
+echo ""
+echo "== 21. a package carried by BOTH a Manjaro repo and a foreign one =="
+# =============================================================================
+# pacman upgrades from the first repository in pacman.conf order that carries
+# the name, so that copy's dependencies are the ones that matter. Judging it by
+# the foreign copy held a package pacman was never going to take from there.
+mkenv dualrepo blackarch
+pacman -U --noconfirm "$(mkpkg dual 1.0-1)" >/dev/null 2>&1
+publish "$REPO_M" extra "$(mkpkg dual 2.0-1)"
+publish "$REPO_F" blackarch "$(mkpkg dual 2.0-1 "libnope>=9.0")"
+out=$(safeup --noconfirm </dev/null 2>&1); rc=$?
+if ! grep -q 'hold dual' <<<"$out" && [ "$(installed_ver dual)" = "2.0-1" ]; then
+    pass "dual upgraded from extra; the foreign copy's impossible dependency was never consulted"
+else
+    fail "package in both repos judged by the wrong copy (rc=$rc): $(grep -i 'hold' <<<"$out" | head -2 | tr '\n' ' ')"
+fi
+
+# =============================================================================
+echo ""
+echo "== 22. --check reports without touching the real sync database =="
+# =============================================================================
+# Refreshing the real database and then NOT upgrading is the textbook way to
+# set up a partial upgrade: the next `pacman -S foo` installs against a
+# database newer than the system. The pre-flight therefore refreshes a private
+# snapshot, and the real database must be exactly as stale afterwards as it
+# was before.
+mkenv check blackarch
+publish "$REPO_M" extra "$(mkpkg libc1 1.0-1)"
+LIBC1="$ENV_DIR/build/libc1-1.0-1-$ARCH.pkg.tar.gz"
+TOOLC1=$(mkpkg toolc 1.0-1 "libc1>=1.0")
+pacman -U --noconfirm "$LIBC1" "$TOOLC1" >/dev/null 2>&1
+pacman -Sy >/dev/null 2>&1                                       # the REAL database, synced now
+publish "$REPO_F" blackarch "$(mkpkg toolc 2.0-1 "libc1>=2.0")"   # published AFTER that sync
+out=$(safeup --check </dev/null 2>&1); rc=$?
+if [ "$rc" = "0" ] && grep -q 'toolc' <<<"$out" && grep -qi 'hold' <<<"$out"; then
+    pass "--check sees the pending toolc upgrade and says it would be held (exit 0)"
+else
+    fail "--check report wrong (rc=$rc): $(tail -5 <<<"$out" | tr '\n' ' ')"
+fi
+[ "$(installed_ver toolc)" = "1.0-1" ] \
+    && pass "--check changed nothing" \
+    || fail "--check upgraded toolc to $(installed_ver toolc)"
+if ! pacman -Qu 2>/dev/null | grep -q 'toolc'; then
+    pass "the REAL sync database is still as stale as before the pre-flight"
+else
+    fail "--check refreshed the real sync database (pacman -Qu now sees toolc)"
+fi
+mkenv checknone
+publish "$REPO_M" extra "$(mkpkg steady 1.0-1)"
+pacman -U --noconfirm "$ENV_DIR/build/steady-1.0-1-$ARCH.pkg.tar.gz" >/dev/null 2>&1
+safeup --check </dev/null >/dev/null 2>&1; rc=$?
+[ "$rc" = "2" ] \
+    && pass "--check exits 2 when nothing is pending (checkupdates semantics)" \
+    || fail "--check with nothing pending exited $rc, not 2"
+
+# =============================================================================
+echo ""
+echo "== 23. a dependency with an epoch is read whole =="
+# =============================================================================
+# `Depends On : libe>=1:2.0` split on ': ' became `libe>=1`, which the
+# installed libe 1.0 satisfies — so the hold that should have happened did
+# not, and pacman refused the whole transaction instead.
+mkenv epoch blackarch
+publish "$REPO_M" extra "$(mkpkg libe 1.0-1)"
+LIBE1="$ENV_DIR/build/libe-1.0-1-$ARCH.pkg.tar.gz"
+TOOLE1=$(mkpkg toole 1.0-1 "libe>=1.0")
+pacman -U --noconfirm "$LIBE1" "$TOOLE1" >/dev/null 2>&1
+publish "$REPO_F" blackarch "$(mkpkg toole 2.0-1 "libe>=1:2.0")"
+out=$(safeup --noconfirm </dev/null 2>&1); rc=$?
+if grep -q 'hold toole (blackarch) — unsatisfied dep: libe>=1:2.0' <<<"$out" && [ "$rc" = "0" ] \
+   && [ "$(installed_ver toole)" = "1.0-1" ]; then
+    pass "epoch constraint libe>=1:2.0 read whole and held; safeup still exits 0"
+else
+    fail "epoch dependency mishandled (rc=$rc): $(grep -i 'hold\|error\|unable' <<<"$out" | head -3 | tr '\n' ' ')"
+fi
 
 # =============================================================================
 echo ""
