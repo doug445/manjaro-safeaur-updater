@@ -1,13 +1,28 @@
 #!/bin/bash
 # aur-pin-check — refuse AUR packages whose PKGBUILD uses unpinned VCS sources.
 #
-# Pinning policy: every git/hg/svn/bzr source in the PKGBUILD must carry a
-# `#commit=<sha>` fragment (40-char hex). Tag fragments (`#tag=...`) are
-# REJECTED because upstream can re-point tags. Non-VCS sources are always
-# acceptable — their integrity is guaranteed by PKGBUILD's sha256sums.
+# Pinning policy — every VCS source in the PKGBUILD must carry the fragment that
+# names one immutable revision for that VCS:
+#
+#   git, fossil   #commit=<40-hex>   (64-hex for SHA-256 repositories)
+#   hg            #revision=<40-hex> (the changeset hash)
+#   svn, bzr      #revision=<N>
+#
+# Tag fragments (`#tag=...`) and branch fragments are REJECTED because upstream
+# can re-point them. Non-VCS sources are always acceptable — their integrity is
+# guaranteed by PKGBUILD's sha256sums. A `?signed` query after the fragment is
+# makepkg asking for a signature check on top of the pin; it is accepted.
+#
+# The git/hg/fossil pins are content-addressed: the hash IS the tree. An svn or
+# bzr revision number is not — it identifies a revision only as long as the
+# server is honest, which is the same trust the tag allowlist below places in a
+# live `git ls-remote`. It is still a pin: the same revision you reviewed, under
+# an honest server, rather than whatever HEAD is today.
 #
 # Reads .SRCINFO (post-eval, no bash execution) from AUR's cgit. Safe to
 # run on untrusted package names: only does an HTTPS fetch + text parse.
+# cgit serves .SRCINFO per pkgBASE; a split package's own name has no branch
+# there, so it is resolved to its pkgbase through the AUR RPC first.
 #
 # Allowlist (escape hatch for tag-pinned upstreams):
 #   /etc/aur-pin-check/allowlist.conf — one rule per line:
@@ -26,7 +41,9 @@
 # repos forever), and whether it is an installed orphan that should simply be
 # removed rather than allowlisted.
 #
-# Exit: 0 all pinned (or no VCS sources), 1 any unpinned, 2 fetch/lookup err.
+# Exit: 0 all pinned (or no VCS sources); 1 any unpinned, or any package whose
+#       .SRCINFO could not be fetched (an unchecked package is never a pass);
+#       2 usage error.
 
 set -uo pipefail
 
@@ -52,18 +69,48 @@ allowlist_sha() {
     ' "$ALLOWLIST"
 }
 
-# Resolve a `git+<url>#tag=<name>` source to its current upstream SHA.
+# Resolve a `git+<url>#tag=<name>[?query]` source to its current upstream SHA.
 # Returns empty string on any failure.
 resolve_git_tag() {
     local spec="$1" url tag
     # Strip the git+ prefix and the #tag=... fragment to get the bare URL.
     url="${spec#git+}"
     tag="${url##*#tag=}"
+    tag="${tag%%\?*}"
     url="${url%%#*}"
     [[ -z "$tag" || "$tag" == "$spec" ]] && return 1
     # ls-remote with an exact ref path; awk to extract the SHA.
     git ls-remote --tags --refs "$url" "refs/tags/$tag" 2>/dev/null \
         | awk 'NR==1 {print $1}'
+}
+
+# Fetch the AUR RPC info record for a name. Echoes the body; fails on any
+# transport error so callers can tell "not indexed" from "could not ask".
+rpc_info() {
+    local rpc; printf -v rpc "$AUR_RPC_URL" "$1"
+    curl -fsSL --max-time 10 "$rpc" 2>/dev/null
+}
+
+# The pkgbase a package name belongs to, per the RPC. Empty if unknown.
+aur_pkgbase() {
+    local body
+    body=$(rpc_info "$1") || return 1
+    grep -oE '"PackageBase":"[^"]+"' <<<"$body" | head -1 | cut -d'"' -f4
+}
+
+# Fetch .SRCINFO for a package name. cgit keys on pkgbase, so a split package's
+# own name 404s; on that failure the RPC is asked for the pkgbase and the fetch
+# is retried once with it. The RPC round-trip is on the failure path only.
+fetch_srcinfo() {
+    local pkg="$1" url body base
+    printf -v url "$AUR_SRCINFO_URL" "$pkg"
+    if body=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) && [[ -n "$body" ]]; then
+        printf '%s\n' "$body"; return 0
+    fi
+    base=$(aur_pkgbase "$pkg") || return 1
+    [[ -n "$base" && "$base" != "$pkg" ]] || return 1
+    printf -v url "$AUR_SRCINFO_URL" "$base"
+    curl -fsSL --max-time 15 "$url" 2>/dev/null
 }
 
 # Is this package still present in the AUR RPC index?
@@ -76,9 +123,8 @@ resolve_git_tag() {
 #
 # Returns: 0 indexed, 1 not indexed, 2 could not determine.
 in_aur_index() {
-    local pkg="$1" body
-    local rpc; printf -v rpc "$AUR_RPC_URL" "$pkg"
-    body=$(curl -fsSL --max-time 10 "$rpc" 2>/dev/null) || return 2
+    local body
+    body=$(rpc_info "$1") || return 2
     case "$body" in
         *'"resultcount":0'*) return 1 ;;
         *'"resultcount":'*)  return 0 ;;
@@ -113,6 +159,20 @@ reject_hints() {
     fi
 }
 
+# Is this source spec pinned to an immutable revision for its VCS?
+# The fragment must be followed by end-of-string, whitespace, or a `?query`.
+is_pinned() {
+    local url="$1" proto re
+    proto="${url%%+*}"; proto="${proto%%:*}"
+    case "$proto" in
+        git|fossil) re='#commit=([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(\?|[[:space:]]|$)' ;;
+        hg)         re='#revision=[0-9a-fA-F]{40}(\?|[[:space:]]|$)' ;;
+        svn|bzr)    re='#revision=[0-9]+(\?|[[:space:]]|$)' ;;
+        *)          return 1 ;;
+    esac
+    [[ "$url" =~ $re ]]
+}
+
 fail=0
 for pkg in "$@"; do
     # Skip packages already in pacman repos — not AUR, not our concern.
@@ -120,27 +180,26 @@ for pkg in "$@"; do
         continue
     fi
 
-    printf -v url "$AUR_SRCINFO_URL" "$pkg"
-    srcinfo=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) || {
+    srcinfo=$(fetch_srcinfo "$pkg") || {
         echo "[pin-check] ERROR $pkg: cannot fetch .SRCINFO from AUR" >&2
         fail=1
         continue
     }
 
-    # Extract source URLs. .SRCINFO format: "\tsource = <spec>"
+    # Extract source URLs. .SRCINFO format: "\tsource = <spec>", plus the
+    # arch-specific arrays "\tsource_x86_64 = <spec>" — which are sources
+    # exactly as much as the plain array is, and used to be skipped.
     unpinned=()
     while IFS= read -r spec; do
         # Strip optional "local-name::" prefix (e.g. pkgname.tar.gz::https://...)
         url="${spec#*::}"
-        # Only examine VCS pseudo-URLs.
+        # Only examine VCS pseudo-URLs: every VCS protocol makepkg supports,
+        # in both its `proto+transport://` and bare `proto://` spellings.
         case "$url" in
-            git+*|git://*|hg+*|svn+*|bzr+*) ;;
+            git+*|git://*|hg+*|hg://*|svn+*|svn://*|bzr+*|bzr://*|fossil+*|fossil://*) ;;
             *) continue ;;
         esac
-        # Pinned iff fragment `#commit=<40-hex>` present.
-        if [[ "$url" =~ \#commit=[0-9a-fA-F]{40}([[:space:]]|$) ]]; then
-            continue
-        fi
+        is_pinned "$url" && continue
         # Allowlist: tag→SHA verification against recorded expected SHA.
         expected_sha=$(allowlist_sha "$pkg" "$url")
         if [[ -n "$expected_sha" ]]; then
@@ -160,7 +219,7 @@ for pkg in "$@"; do
             continue
         fi
         unpinned+=("$url")
-    done < <(awk -F' = ' '/^[[:space:]]*source *=/ {print $2}' <<<"$srcinfo")
+    done < <(awk -F' = ' '/^[[:space:]]*source(_[a-z0-9_]+)? *=/ {print $2}' <<<"$srcinfo")
 
     if (( ${#unpinned[@]} > 0 )); then
         echo "[pin-check] REJECT $pkg: ${#unpinned[@]} unpinned VCS source(s):" >&2

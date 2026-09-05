@@ -11,6 +11,7 @@ github-about.txt
 # Test scratch (the suites clean up after themselves; this is belt-and-braces)
 tests/tmp/
 tests/*.out
+*.pkg.tar.*
 
 # Agent scratch specs — the design notes that matter live in docs/
 docs/superpowers/

@@ -74,6 +74,24 @@
 #   29. a chained dependency is pin-checked exactly like a named target --
 #       an unvetted dep is the same supply-chain hole as an unvetted target
 #   30. a dependency cycle is detected and falls back to yay, naming it
+#   31. `#commit=<40-hex>?signed` is ACCEPTED — the `?signed` query is makepkg's
+#       strongest form, and refusing it penalised the most careful maintainers
+#   32. an unpinned VCS source under `source_x86_64 =` is REJECTED — arch-specific
+#       source arrays are sources too, and skipping them was a silent pass
+#   33. hg `#revision=<40-hex>` is ACCEPTED, bare hg REJECTED — hg has no
+#       `#commit=`; its changeset hash is the content-addressed pin
+#   34. svn `#revision=N` is ACCEPTED, bare `svn://` REJECTED
+#   35. a bare `fossil+` source is REJECTED — it is a VCS makepkg supports, and
+#       not recognising it meant accepting it
+#   36. a SPLIT package (its own name has no cgit branch) is resolved to its
+#       pkgbase through the RPC and judged on the pkgbase's sources, in both
+#       directions — instead of an ERROR that blocked the whole upgrade set
+#   37. aurinstall builds a split package's PKGBASE in the chroot, once
+#   38. with PKGDEST unset, the built package SURVIVES in the invoking
+#       directory after a no-install run — it used to be deleted with the
+#       temp dir before the "install later" message could even be read
+#   39. --install installs the artifact without a prompt; --no-install never
+#       touches pacman -U
 #
 # Run:  bash tests/pin-fixture-test.sh
 # Requires: bash >= 4, git, curl (with file:// support), awk, coreutils.
@@ -93,8 +111,12 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/safeup-pin-test.XXXXXX")
 PASS=0; FAIL=0
 pass() { echo "  PASS: $*"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
-cleanup() { rm -rf "$WORK"; }
+cleanup() { cd / && rm -rf "$WORK"; }
 trap cleanup EXIT
+# Run from inside the scratch tree. aurinstall keeps a built package in the
+# directory it was invoked from when PKGDEST is unset (case 38), so a suite run
+# from the repository root used to leave *.pkg.tar.zst files in the checkout.
+cd "$WORK" || exit 1
 
 mkdir -p "$WORK/srcinfo" "$WORK/rpc" "$WORK/shim" "$WORK/git"
 
@@ -117,13 +139,27 @@ case "$1" in
   -Si)   grep -qxF -- "$2" "$WORK_REPO_PKGS" 2>/dev/null && { echo "Repository : extra"; exit 0; }; exit 1 ;;
   -Qq)   grep -qxF -- "$2" "$WORK_INSTALLED" 2>/dev/null && { echo "$2"; exit 0; }; exit 1 ;;
   -Qdtq) cat "$WORK_ORPHANS" 2>/dev/null; exit 0 ;;
-  -Ssq)  exit 1 ;;   # no provider search hits in fixtures
+  -Sddp) exit 1 ;;   # nothing in the fixture repos satisfies a dependency
+  -U)    printf '%s\n' "$*" >> "$WORK_PACMAN_LOG"; exit 0 ;;
   *)     exit 1 ;;
 esac
 SHIM
 chmod +x "$WORK/shim/pacman"
 export WORK_REPO_PKGS="$WORK/repo-pkgs" WORK_INSTALLED="$WORK/installed" WORK_ORPHANS="$WORK/orphans"
-: > "$WORK_REPO_PKGS"; : > "$WORK_INSTALLED"; : > "$WORK_ORPHANS"
+export WORK_PACMAN_LOG="$WORK/pacman.log"
+: > "$WORK_REPO_PKGS"; : > "$WORK_INSTALLED"; : > "$WORK_ORPHANS"; : > "$WORK_PACMAN_LOG"
+# aurinstall reads PKGDEST from makepkg.conf the way chrootbuild does: the
+# invoking user's /home/<name>/.makepkg.conf, then the global file. Point the
+# global file at nothing, and give `id -un` a name with no home directory, so
+# neither of the host's real makepkg.conf files can leak a PKGDEST into the
+# fixtures.
+export MAKEPKG_CONF=/dev/null
+cat > "$WORK/shim/id" <<'SHIM'
+#!/bin/bash
+[[ "${1:-}" == -un ]] && { echo safeaur-fixture-user; exit 0; }
+exec /usr/bin/id "$@"
+SHIM
+chmod +x "$WORK/shim/id"
 
 # yay stub — records its argv so we can prove whether a gate actually blocked
 # the exec, rather than assuming it from an exit code.
@@ -143,6 +179,12 @@ export WORK_YAY_LOG="$WORK/yay.log" WORK_YAY_QUA="$WORK/yay-qua"
 cat > "$WORK/shim/chrootbuild" <<'SHIM'
 #!/bin/bash
 printf '%s\n' "$*" >> "$WORK_CB_LOG"
+# Like the real thing with PKGDEST unset: every -p <pkg> leaves its artifact in
+# the directory chrootbuild was started from.
+while (( $# )); do
+    [[ "$1" == -p ]] && : > "$PWD/$2-1.0-1-x86_64.pkg.tar.zst"
+    shift
+done
 exit 0
 SHIM
 cat > "$WORK/shim/pacman-mirrors" <<'SHIM'
@@ -168,8 +210,14 @@ srcinfo() {
     } > "$WORK/srcinfo/$pkg.SRCINFO"
 }
 
-# Write an AUR RPC fixture: rpc <pkg> <resultcount>
-rpc() { printf '{"resultcount":%s,"results":[]}' "$2" > "$WORK/rpc/$1.json"; }
+# Write an AUR RPC fixture: rpc <pkg> <resultcount> [pkgbase]
+rpc() {
+    if [[ -n "${3:-}" ]]; then
+        printf '{"resultcount":%s,"results":[{"Name":"%s","PackageBase":"%s"}]}' "$2" "$1" "$3"
+    else
+        printf '{"resultcount":%s,"results":[]}' "$2"
+    fi > "$WORK/rpc/$1.json"
+}
 
 # Run aur-pin-check on one package, capturing combined output.
 check() { aur-pin-check "$@" >"$WORK/out" 2>&1; echo $?; }
@@ -415,7 +463,6 @@ mk_aur_repo() {
       && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
 }
 export AUR_GIT_BASE="file://$AURGIT"
-export PKGDEST_TEST="$WORK/pkgdest"; mkdir -p "$PKGDEST_TEST"
 
 # 19. the pin-check gate still runs, and nothing reaches chrootbuild
 : > "$WORK_CB_LOG"
@@ -445,7 +492,7 @@ srcinfo cleanpkg "https://example.invalid/clean.tar.gz"
 rpc cleanpkg 1
 mk_aur_repo cleanpkg
 : > "$WORK_CB_LOG"
-aurinstall --chroot cleanpkg </dev/null >/dev/null 2>&1
+aurinstall --chroot --no-install cleanpkg </dev/null >/dev/null 2>&1
 if grep -q -- '-b stable' "$WORK_CB_LOG"; then
     pass "--chroot passes an explicit branch, never chrootbuild's 'unstable' default"
 else
@@ -462,7 +509,7 @@ fi
 # --- the gate, in auto mode -------------------------------------------------
 # 23. an eligible package goes to the chroot with no flag at all
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
-aurinstall cleanpkg </dev/null >/dev/null 2>&1
+aurinstall --no-install cleanpkg </dev/null >/dev/null 2>&1
 if grep -q -- '-p cleanpkg' "$WORK_CB_LOG" && ! grep -q -- '-S ' "$WORK_YAY_LOG"; then
     pass "auto mode uses the chroot for an eligible package, with no flag"
 else
@@ -525,7 +572,7 @@ for pkg in chdep2 chdep1 chtarget; do rpc "$pkg" 1; mk_aur_repo "$pkg"; done
 
 # 28. build order computed and chained with -n, in one invocation
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
-out=$(aurinstall chtarget </dev/null 2>&1)
+out=$(aurinstall --no-install chtarget </dev/null 2>&1)
 if grep -q -- '-p chdep2 -n -p chdep1 -n -p chtarget' "$WORK_CB_LOG"; then
     pass "chain built deps-first in one run: -p chdep2 -n -p chdep1 -n -p chtarget"
 else
@@ -552,6 +599,117 @@ if grep -q 'dependency cycle' <<<"$out" && grep -q -- '-S chtarget' "$WORK_YAY_L
     pass "a dependency cycle falls back to yay, naming the cycle"
 else
     fail "cycle not handled: $(grep 'using yay' <<<"$out")"
+fi
+
+# =============================================================================
+echo "== 31-35. the corners of makepkg's VCS syntax =="
+# =============================================================================
+# `?signed` asks makepkg to verify the commit's signature on top of the pin. It
+# follows the fragment, so a pin regex anchored on whitespace-or-end refused the
+# one form that is stricter than the policy itself.
+srcinfo signedpin "git+https://example.invalid/s.git#commit=$SHA_A?signed"
+rpc     signedpin 1
+[[ $(check signedpin) == 0 ]] \
+    && pass "#commit=<40-hex>?signed accepted (the strongest form is not refused)" \
+    || fail "commit pin with ?signed was rejected: $(cat "$WORK/out")"
+
+# .SRCINFO carries arch-specific arrays as `source_x86_64 = ...`. A parser that
+# only reads `source =` never sees them — and an unseen source is an accepted one.
+{ printf 'pkgbase = archsrc\n\tpkgver = 1.0\n\tpkgrel = 1\n'
+  printf '\tsource_x86_64 = git+https://example.invalid/arch.git\n'
+  printf '\npkgname = archsrc\n'; } > "$WORK/srcinfo/archsrc.SRCINFO"
+rpc archsrc 1
+rc=$(check archsrc)
+if [[ $rc == 1 ]] && grep -q 'arch.git' "$WORK/out"; then
+    pass "unpinned VCS source under source_x86_64 is rejected (arch arrays are sources too)"
+else
+    fail "source_x86_64 was not inspected (rc=$rc) — a silent pass"
+fi
+
+srcinfo hgpinned "hg+https://example.invalid/h#revision=$SHA_A"
+rpc     hgpinned 1
+[[ $(check hgpinned) == 0 ]] \
+    && pass "hg #revision=<40-hex> accepted (the changeset hash is hg's content-addressed pin)" \
+    || fail "hg revision pin rejected: $(cat "$WORK/out")"
+srcinfo hgbare "hg+https://example.invalid/h"
+rpc     hgbare 1
+[[ $(check hgbare) == 1 ]] \
+    && pass "bare hg source rejected" \
+    || fail "bare hg source accepted"
+
+srcinfo svnpinned "svn+https://example.invalid/svn/trunk#revision=1234"
+rpc     svnpinned 1
+[[ $(check svnpinned) == 0 ]] \
+    && pass "svn #revision=N accepted" \
+    || fail "svn revision pin rejected: $(cat "$WORK/out")"
+srcinfo svnbare "svn://example.invalid/svn/trunk"
+rpc     svnbare 1
+[[ $(check svnbare) == 1 ]] \
+    && pass "bare svn:// source rejected" \
+    || fail "bare svn:// source accepted"
+
+srcinfo fossilbare "fossil+https://example.invalid/f"
+rpc     fossilbare 1
+[[ $(check fossilbare) == 1 ]] \
+    && pass "bare fossil+ source rejected (a VCS makepkg supports is a VCS we check)" \
+    || fail "fossil+ source was not recognised as VCS — accepted unpinned"
+
+# =============================================================================
+echo "== 36. split packages resolve to their pkgbase =="
+# =============================================================================
+# cgit serves .SRCINFO per pkgBASE branch. A split package's own name 404s, and
+# `aurupdate` would then report an ERROR for it on every run — which, because an
+# error blocks the whole set, taught people to bypass the gate with `yay -Sua`.
+srcinfo basepkg "git+https://example.invalid/base.git#commit=$SHA_A"
+rpc     basepkg 1
+rpc     splitpkg 1 basepkg          # no splitpkg.SRCINFO exists — only the RPC knows
+[[ $(check splitpkg) == 0 ]] \
+    && pass "split package resolved to its pkgbase and judged on the pkgbase's (pinned) sources" \
+    || fail "split package not resolved: $(cat "$WORK/out")"
+srcinfo basepkg "git+https://example.invalid/base.git"        # now unpin the base
+rc=$(check splitpkg)
+if [[ $rc == 1 ]] && grep -q 'REJECT splitpkg' "$WORK/out"; then
+    pass "split package REJECTED when its pkgbase carries an unpinned source"
+else
+    fail "unpinned pkgbase behind a split package slipped through (rc=$rc)"
+fi
+srcinfo basepkg "https://example.invalid/base.tar.gz"          # clean, for aurinstall below
+
+# =============================================================================
+echo "== 37-39. aurinstall: split pkgbase, artifact survival, --install =="
+# =============================================================================
+mk_aur_repo basepkg
+: > "$WORK_CB_LOG"
+aurinstall --no-install splitpkg </dev/null >/dev/null 2>&1
+if grep -q -- '-p basepkg' "$WORK_CB_LOG" && ! grep -q -- '-p splitpkg' "$WORK_CB_LOG"; then
+    pass "a split package is built by cloning and building its pkgbase, once"
+else
+    fail "split package chroot build wrong: $(cat "$WORK_CB_LOG")"
+fi
+
+# With PKGDEST unset, chrootbuild leaves the artifact where it was started — a
+# temp dir aurinstall removes on exit. The artifact has to be moved somewhere
+# durable before that, or "install later with pacman -U <path>" names a file
+# that no longer exists by the time the line is printed.
+INVOKE="$WORK/invoke"; mkdir -p "$INVOKE"
+: > "$WORK_PACMAN_LOG"
+out=$(cd "$INVOKE" && aurinstall --no-install cleanpkg </dev/null 2>&1); rc=$?
+if (( rc == 0 )) && [[ -f "$INVOKE/cleanpkg-1.0-1-x86_64.pkg.tar.zst" ]] \
+   && grep -q "$INVOKE/cleanpkg-1.0-1-x86_64.pkg.tar.zst" <<<"$out"; then
+    pass "with PKGDEST unset the built package survives in the invoking directory, and is named"
+else
+    fail "built package lost or not reported (rc=$rc): $(ls "$INVOKE" 2>/dev/null | tr '\n' ' ') :: $out"
+fi
+[[ ! -s "$WORK_PACMAN_LOG" ]] \
+    && pass "--no-install never reaches pacman -U" \
+    || fail "--no-install still installed: $(cat "$WORK_PACMAN_LOG")"
+
+: > "$WORK_PACMAN_LOG"
+( cd "$INVOKE" && aurinstall --install cleanpkg </dev/null >/dev/null 2>&1 )
+if grep -q -- '-U .*cleanpkg-1.0-1-x86_64.pkg.tar.zst' "$WORK_PACMAN_LOG"; then
+    pass "--install runs pacman -U on the built artifact without a prompt"
+else
+    fail "--install did not install: $(cat "$WORK_PACMAN_LOG")"
 fi
 
 echo ""
