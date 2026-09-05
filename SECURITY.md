@@ -1,6 +1,6 @@
 # Security Policy
 
-**Manjaro SafeAUR Updater 1.3.0**
+**Manjaro SafeAUR Updater 1.4.0**
  
 ## Supported Versions
 

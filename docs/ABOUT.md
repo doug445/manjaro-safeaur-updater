@@ -2,7 +2,7 @@
 
 ## What it is
 
-Five bash scripts that sit between you and `pacman`/`yay`, and refuse the three
+Six bash scripts that sit between you and `pacman`/`yay`, and refuse the three
 operations that break Manjaro systems.
 
 That is the whole product. There is no daemon, no database, no configuration

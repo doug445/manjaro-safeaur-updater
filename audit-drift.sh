@@ -23,7 +23,6 @@ pairs=(
     "bin/aurupdate           /usr/local/bin/aurupdate"
     "bin/remove-versioned-kernel  /usr/local/bin/remove-versioned-kernel"
     "etc/logrotate.d/safeup  /etc/logrotate.d/safeup"
-    "config/yay/config.json  $HOME/.config/yay/config.json"
 )
 
 # Deliberately NOT audited:
@@ -33,6 +32,9 @@ pairs=(
 #     train you to ignore this report.
 #   systemd/user/safeup-drift-audit.service — a template. deploy.sh substitutes
 #     the checkout path into it, so the installed copy never hashes equal.
+#   config/yay/config.json — a user preference. deploy.sh shows the diff and
+#     asks before replacing an existing one, so a deliberate "no" there would
+#     otherwise come back as a drift notification every month.
 
 mismatches=()
 for pair in "${pairs[@]}"; do

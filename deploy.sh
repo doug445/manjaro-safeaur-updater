@@ -60,6 +60,7 @@ ask() { # ask "<question>" — honours --yes, defaults to no on a closed stdin
 RUNTIME_DEPS=(
     "curl        curl"          # aur-pin-check fetches .SRCINFO and the RPC index
     "git         git"           # aur-pin-check resolves allowlisted tags
+    "fakeroot    fakeroot"      # safeup --check refreshes a private database copy without root
     "awk         gawk"          # .SRCINFO and pacman -Si parsing throughout
     "logrotate   logrotate"     # /etc/logrotate.d/safeup is inert without it
     "notify-send libnotify"     # audit-drift.sh's desktop notification
@@ -95,14 +96,28 @@ install_deps() {
     if (( ${#missing_pkgs[@]} > 0 )); then
         say "missing dependencies:"
         printf '           - %s\n' "${missing_desc[@]}"
-        # --needed makes this a no-op for anything already installed, so a
-        # duplicate package name in the list above costs nothing.
-        if ask "install them with pacman?"; then
-            sudo pacman -S --needed --noconfirm "${missing_pkgs[@]}" \
-                || die "pacman could not install: ${missing_pkgs[*]}"
-            say "dependencies installed"
-        else
-            warn "continuing without them — the affected features will not work"
+        # pacman refuses a whole transaction over one unknown target, and
+        # manjaro-chrootbuild is unknown to every repository but Manjaro's. A
+        # package no configured repo carries is reported and skipped so the
+        # rest still installs; the feature that wanted it degrades on its own
+        # (aurinstall falls back to yay, and says so).
+        local -a can=() cannot=()
+        for pkg in "${missing_pkgs[@]}"; do
+            if pacman -Si "$pkg" >/dev/null 2>&1; then can+=("$pkg"); else cannot+=("$pkg"); fi
+        done
+        if (( ${#cannot[@]} > 0 )); then
+            warn "not in any configured repository, skipped: ${cannot[*]}"
+        fi
+        if (( ${#can[@]} > 0 )); then
+            # --needed makes this a no-op for anything already installed, so a
+            # duplicate package name in the list above costs nothing.
+            if ask "install ${can[*]} with pacman?"; then
+                sudo pacman -S --needed --noconfirm "${can[@]}" \
+                    || die "pacman could not install: ${can[*]}"
+                say "dependencies installed"
+            else
+                warn "continuing without them — the affected features will not work"
+            fi
         fi
     else
         say "all dependencies present"
@@ -226,7 +241,24 @@ else
 fi
 
 say "installing yay config (user-scoped)..."
-backup_then_install_user "$HERE/config/yay/config.json" "$HOME/.config/yay/config.json"
+YAY_CONF="$HOME/.config/yay/config.json"
+if [[ -f "$YAY_CONF" ]] && ! cmp -s "$HERE/config/yay/config.json" "$YAY_CONF"; then
+    # This file changes how yay behaves in EVERY invocation, not just through
+    # the wrappers here: it switches off the per-package PKGBUILD diff, edit
+    # and clean menus, on the reasoning that aur-pin-check is the gate. That
+    # is a choice to make knowingly, so an existing, different config is
+    # never replaced without asking (--yes answers for you). A timestamped
+    # backup is kept either way.
+    say "  $YAY_CONF exists and differs from the suite's:"
+    diff -u "$YAY_CONF" "$HERE/config/yay/config.json" | sed 's/^/    /' || true
+    if ask "replace it with the suite's yay config?"; then
+        backup_then_install_user "$HERE/config/yay/config.json" "$YAY_CONF"
+    else
+        say "  left alone"
+    fi
+else
+    backup_then_install_user "$HERE/config/yay/config.json" "$YAY_CONF"
+fi
 
 say "installing the drift-audit timer (user-scoped)..."
 UNIT_DIR="$HOME/.config/systemd/user"
