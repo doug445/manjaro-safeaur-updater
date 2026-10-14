@@ -64,6 +64,36 @@ So: the AUR assumes you are current with Arch. Manjaro's Stable branch
 deliberately is not. Nobody supports the gap. **This suite is the gap,
 handled.**
 
+### Manjaro puts the AUR in its own package manager, then disowns it
+
+Pamac — the "Add/Remove Software" app on every Manjaro desktop — has AUR
+support built in, behind a switch in its preferences. Manjaro's moderators,
+meanwhile, say the AUR is "neither officially supported by Arch nor by
+Manjaro", and that "any CUSTOM package may cease to function without warning".
+Manjaro builds the door, holds its Stable branch back from the Arch packages
+the AUR is written against, and tells you that whatever comes through the door
+is your problem.
+
+Its own tool has not been a good neighbour to the AUR either. In November 2021
+Pamac sent aur.archlinux.org so many requests that the AUR's administrators
+wrote: "We have completely blocked the Pamac user agent, to restore service for
+the users" ([Pamac issue #1017](https://gitlab.manjaro.org/applications/pamac/-/issues/1017);
+[Manjaro forum, 12 November 2021](https://forum.manjaro.org/t/manjaro-banned-from-aur/89986)).
+Manjaro's own wiki still warns users not to enable Pamac's AUR update checks,
+because they flood the AUR and get Pamac's user agent denylisted.
+
+### About those two weeks
+
+Manjaro's headline feature is a calendar. Its Stable branch is Arch with a
+two-week delay, sold as "testing" — testing that the AUR, the reason half its
+users came, never takes part in. So the AUR keeps building for an Arch that
+Manjaro users will not have for another fortnight, things break in the gap, and
+the official response is a forum post explaining that the breakage is yours.
+That is not curation; it is jet lag with a disclaimer. Arch users get today's
+packages. Manjaro users get last fortnight's, plus a moderator telling them it
+is their own fault. This suite exists so you do not have to choose between the
+AUR and a system that boots.
+
 ---
 
 ## What actually goes wrong, and what closes it
@@ -205,8 +235,8 @@ alias yupdate='safeup ; aurupdate'
 
 `aurinstall --chroot` hands the actual build to
 [`chrootbuild`](https://gitlab.manjaro.org/tools/development-tools/manjaro-chrootbuild),
-from Manjaro's own `manjaro-chrootbuild` package. The suggestion came from
-linux-aarhus of the Manjaro team, and the two tools answer different questions:
+from Manjaro's own `manjaro-chrootbuild` package (suggested on the Manjaro
+forum by linux-aarhus). The two tools answer different questions:
 
 | | Question it answers |
 |---|---|
@@ -241,9 +271,9 @@ failing:
   first, as one `chrootbuild` run chained with `-n`
   (`-p dep2 -n -p dep1 -n -p target`), and every chained dependency is
   pin-checked exactly like a named target — an unvetted dep is the same
-  supply-chain hole as an unvetted target. The `-n` form is due to
-  linux-aarhus, whose flightgear experiments also supplied the failure case
-  the resolver refuses on.
+  supply-chain hole as an unvetted target. The `-n` form was
+  posted on the Manjaro forum by linux-aarhus, as was the failure case the
+  resolver refuses on.
 - The package is a `*-bin`. Nothing is compiled, so a chroot cannot change what
   gets installed. It *would* still isolate the PKGBUILD's own execution — a
   real if smaller benefit — so `--chroot` forces it anyway if you want that.
