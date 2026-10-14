@@ -17,6 +17,9 @@ It is six short bash scripts, no daemon, no runtime dependency beyond pacman,
 coreutils and fakeroot, and 93 tests, 46 of which run real `pacman`
 transactions on a loop device.
 
+**Guides:** [AUR package broken after a Manjaro update](https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/) ·
+["could not satisfy dependencies" with chaotic-aur or BlackArch](https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/)
+
 ---
 
 ## The problem, in other people's words
