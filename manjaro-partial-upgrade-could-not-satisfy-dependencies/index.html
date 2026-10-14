@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manjaro “could not satisfy dependencies” with chaotic-aur</title>
+<meta name="description" content="Manjaro pacman -Syu fails with “could not satisfy dependencies” when chaotic-aur or BlackArch is ahead of Manjaro. Why it happens and how to hold it safely.">
+<link rel="canonical" href="https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Manjaro SafeAUR Updater">
+<meta property="og:title" content="Manjaro “could not satisfy dependencies” with chaotic-aur">
+<meta property="og:description" content="Manjaro pacman -Syu fails with “could not satisfy dependencies” when chaotic-aur or BlackArch is ahead of Manjaro. Why it happens and how to hold it safely.">
+<meta property="og:url" content="https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/">
+<meta property="og:image" content="https://doug445.github.io/manjaro-safeaur-updater/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "Manjaro “could not satisfy dependencies” with chaotic-aur or BlackArch",
+      "description": "Manjaro pacman -Syu fails with “could not satisfy dependencies” when chaotic-aur or BlackArch is ahead of Manjaro. Why it happens and how to hold it safely.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/manjaro-safeaur-updater/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/",
+      "about": { "@type": "SoftwareApplication", "name": "manjaro-safeaur-updater", "url": "https://doug445.github.io/manjaro-safeaur-updater/", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Manjaro Linux" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Manjaro SafeAUR Updater", "item": "https://doug445.github.io/manjaro-safeaur-updater/" },
+        { "@type": "ListItem", "position": 2, "name": "Partial upgrades", "item": "https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Is pacman --ignore a partial upgrade?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Skipping any package during pacman -Syu leaves your system on a mix of versions the repositories never shipped together, and both the Arch and Manjaro wikis warn against it. What --ignore cannot do is install a set of packages with an unsatisfied declared dependency: pacman resolves the whole transaction and refuses instead. The risk that remains is holding a library while the packages built against it move on, so hold the dependent package, for one upgrade, and retry without the hold next time." } },
+        { "@type": "Question", "name": "Why do chaotic-aur and BlackArch break Manjaro but not Arch?", "acceptedAnswer": { "@type": "Answer", "text": "Both build against Arch’s current repositories. Manjaro Stable receives packages after roughly a couple of weeks of testing, so for a while the third-party package needs library versions Manjaro does not ship yet. On Arch the library and the rebuilt package arrive together." } },
+        { "@type": "Question", "name": "Did the failed pacman -Syu change anything?", "acceptedAnswer": { "@type": "Answer", "text": "No packages changed: “failed to prepare transaction” means pacman stopped before installing anything. The database refresh did happen: the -y step already ran, so your sync databases are now newer than your installed packages. Resolve the error and complete a full upgrade before installing anything else with pacman -S." } },
+        { "@type": "Question", "name": "How long until Manjaro catches up?", "acceptedAnswer": { "@type": "Answer", "text": "There is no fixed date. Manjaro’s wiki describes Stable packages as having gone through roughly a couple of weeks of testing on the Unstable and Testing branches. Retry a plain pacman -Syu after each Stable update and drop the hold as soon as it succeeds." } },
+        { "@type": "Question", "name": "Should I switch to the Unstable branch to avoid this?", "acceptedAnswer": { "@type": "Answer", "text": "It narrows the gap, since Unstable is synced with Arch several times a day, but Manjaro-specific packages such as kernels enter there before they have been tested. That is a trade-off to make deliberately, and after switching branches you must sync and upgrade with pacman -Syu." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">Manjaro SafeAUR Updater</a>
+    <a href="../aur-package-broken-after-manjaro-update/">AUR broken after update</a>
+    <a href="../manjaro-partial-upgrade-could-not-satisfy-dependencies/">Partial upgrades</a>
+    <a href="https://github.com/doug445/manjaro-safeaur-updater">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">Manjaro SafeAUR Updater</a> › Partial upgrades</p>
+<h1>Manjaro “could not satisfy dependencies” with chaotic-aur or BlackArch</h1>
+<p class="lede">You have chaotic-aur, BlackArch or another third-party binary repository enabled, and <code>pacman -Syu</code> stops with <code>error: failed to prepare transaction (could not satisfy dependencies)</code>, or tells you that installing one package breaks a dependency required by another. This page explains what the message means, why Manjaro hits it when Arch does not, the manual ways out that do not make things worse, and exactly how far <code>--ignore</code> can be trusted.</p>
+
+<h2 id="meaning">What the error means</h2>
+<p>It comes in two forms, and both are pacman refusing a transaction before it changes anything. pacman may print warnings above them; the lines that matter look like this, with placeholder package names:</p>
+<div class="codeblock"><pre><code>error: failed to prepare transaction (could not satisfy dependencies)
+:: unable to satisfy dependency 'libfoo&gt;=2.0' required by bar</code></pre></div>
+<p>The new version of <code>bar</code>, usually from your third-party repository, needs <code>libfoo</code> 2.0 or later. Nothing installed provides it, and nothing in this upgrade will.</p>
+<div class="codeblock"><pre><code>error: failed to prepare transaction (could not satisfy dependencies)
+:: installing libfoo (2.0-1) breaks dependency 'libfoo=1.0' required by bar</code></pre></div>
+<p>This is the other direction. Upgrading <code>libfoo</code> would leave an installed package, <code>bar</code>, with a version requirement it no longer meets. <code>bar</code> is often a foreign or AUR package built against the old version.</p>
+<p>“Failed to prepare transaction” means pacman stopped before downloading or installing any package. The <code>-y</code> half of <code>-Syu</code>, however, has already run: your sync databases are now newer than your installed packages. The Arch wiki’s rule for this state is that the error “must be resolved and the upgrade operation completed before other package management operations.” In particular, do not <code>pacman -S</code> anything else until you have.</p>
+
+<h2 id="why">Why Manjaro hits this and Arch does not</h2>
+<p>chaotic-aur and BlackArch build against Arch’s repositories and publish as soon as Arch moves. Manjaro’s branches do not move with Arch: Unstable “is synced several times a day with Arch package releases”, while packages reach Stable only after “roughly a couple of weeks testing by the users of the Unstable/Testing repos”.</p>
+<p>So for a while the third-party repository’s <code>bar</code> is built for Arch’s <code>libfoo 2.0</code> and Manjaro’s repository still carries <code>libfoo 1.0</code>. On Arch the two arrive together. On Manjaro there is a gap, and every <code>pacman -Syu</code> during it asks pacman to install a package whose dependencies your repositories cannot meet yet. The How-To Geek article quoted in the sources describes the same mismatch for AUR packages.</p>
+<p>The same gap causes the opposite problem later: AUR packages built against <code>libfoo 1.0</code> break when Manjaro ships 2.0. That is covered in <a href="../aur-package-broken-after-manjaro-update/">AUR package broken after a Manjaro update</a>.</p>
+
+<h2 id="diagnose">Find out which package is stuck</h2>
+<p>To see what is pending without touching the sync databases, use <code>checkupdates</code> from <code>pacman-contrib</code>, which both the Arch and Manjaro wikis recommend for this:</p>
+<div class="codeblock"><pre><code>checkupdates</code></pre></div>
+<p>Then compare what <code>bar</code> wants with what you have and what your Manjaro repositories offer:</p>
+<div class="codeblock"><pre><code>pacman -Si bar
+pacman -Si libfoo
+pacman -Qi libfoo</code></pre></div>
+<p><code>pacman -Si bar</code> shows the <code>Repository</code> it comes from and its <code>Depends On</code> line with the version constraint. If more than one repository carries the name, it prints one block per repository; the first, in <code>pacman.conf</code> order, is the copy <code>-Syu</code> installs. <code>pacman -Si libfoo</code> shows the newest version your repositories offer, and <code>pacman -Qi libfoo</code> shows the installed version and what requires it. If the version <code>bar</code> needs is newer than anything Manjaro offers, you are looking at the lag, not a broken mirror.</p>
+
+<h2 id="fix">Safe ways out</h2>
+
+<h3>Wait</h3>
+<p>When Manjaro ships <code>libfoo 2.0</code>, a plain <code>pacman -Syu</code> installs both together and the error goes away. The cost is that until then <code>pacman -Syu</code> keeps stopping at this error, so you get no other updates either. That is why most people reach for the next option.</p>
+
+<h3>Hold the new version of the dependent package, for one upgrade</h3>
+<div class="codeblock"><pre><code>sudo pacman -Syu --ignore bar</code></pre></div>
+<p><code>--ignore</code> takes a comma-separated list and applies to this one command, unlike <code>IgnorePkg</code> in <code>pacman.conf</code>, which applies until you remove it. <code>bar</code> stays at the version you already have, everything else upgrades, and pacman still checks <code>bar</code>’s existing dependencies against everything that moves. Next time, run plain <code>pacman -Syu</code> again and see whether Manjaro has caught up.</p>
+<p>This is a partial upgrade, and both wikis say so. The Arch wiki: “Be careful in skipping packages, since partial upgrades are unsupported.” Manjaro’s: “Don't add packages to pacman's or pamac's ignore list.” The reason for the rule is the Arch wiki’s own example: upgrading one package pulls in a new library, which “might then break the other package which depends on an older version of the library.” Holding a <em>library</em> while its dependents move forward is that pattern. Holding <code>bar</code>, the dependent whose new version cannot install correctly right now anyway, is the opposite direction: its old version keeps the dependencies it was already installed with.</p>
+<p>Keep the hold visible. Write it down, and retry without <code>--ignore</code> after each Manjaro Stable update. A hold that quietly becomes permanent is the long-term hazard.</p>
+
+<h3>What not to do</h3>
+<ul>
+<li><strong><code>pacman -Sy bar</code>, or <code>pacman -Sy</code> followed by <code>pacman -S bar</code>.</strong> The Arch wiki names both as partial upgrades not to use.</li>
+<li><strong>Installing a newer <code>libfoo</code> from the third-party repository or an Arch mirror.</strong> Manjaro’s own packages are built against the <code>libfoo</code> Manjaro ships. Replacing it underneath them is the wiki’s example in full.</li>
+<li><strong>Forcing past the dependency check, or symlinking a missing soname.</strong> The Arch wiki: “do not "fix" the problem simply by symlinking.”</li>
+<li><strong>Adding <code>bar</code> to <code>IgnorePkg</code> and forgetting it.</strong></li>
+</ul>
+
+<h2 id="ignore">Can <code>--ignore</code> leave a dependency unsatisfied?</h2>
+<p>Not a declared one. <code>--ignore</code> suppresses an upgrade; it does not suppress dependency resolution. pacman still resolves the whole transaction and refuses one that would leave a dependency unsatisfied. The manjaro-safeaur-updater README shows this as a test against a throwaway pacman root rather than an assertion: <code>consumer 1.0</code> requires <code>libX=1.0</code>, both have upgrades pending, and <code>libX</code> is ignored so that <code>consumer 2.0</code> would need a <code>libX 2.0</code> that will not be installed.</p>
+<div class="codeblock"><pre><code>$ pacman -Syu --noconfirm --ignore libX
+warning: ignoring package libX-2.0-1
+warning: cannot resolve "libX=2.0", a dependency of "consumer"
+error: failed to prepare transaction (could not satisfy dependencies)
+:: unable to satisfy dependency 'libX=2.0' required by consumer
+                                                            exit 1
+
+$ pacman -Q                       # nothing moved
+consumer 1.0-1
+libX 1.0-1
+
+$ pacman -Dk                      # pacman's own consistency audit
+No database errors have been found!</code></pre></div>
+<p>Nothing moved, and pacman’s database check finds nothing wrong. The transcript is section 19 of <a href="https://github.com/doug445/manjaro-safeaur-updater/blob/main/tests/loopback-core-test.sh"><code>tests/loopback-core-test.sh</code></a> and runs in CI against real pacman transactions. It tests pacman’s behaviour, not any wrapper’s: if you <code>--ignore</code> the wrong thing, pacman refuses rather than installing a broken set.</p>
+<div class="note">
+<p><strong>Where that guarantee ends.</strong> pacman checks the dependencies packages <em>declare</em>. It cannot see a soname recorded inside a binary unless the package also declares it as a dependency. The guarantee is only as strong as the packages’ metadata, which is why the direction of a hold still matters. And any tool that automates <code>--ignore</code> inherits this property rather than adding to it: you are trusting pacman’s resolver, not the tool.</p>
+</div>
+
+<h2 id="automated">Automating the hold</h2>
+<div class="tool">
+<p><strong>Automated:</strong> <code>safeup</code>, from <a href="https://github.com/doug445/manjaro-safeaur-updater">manjaro-safeaur-updater</a>, makes this decision before <code>pacman -Syu</code> rather than after it fails. It reads your repositories from <code>pacman.conf</code> and treats any that is not <code>core</code>, <code>extra</code>, <code>multilib</code>, <code>community</code>, <code>core-testing</code>, <code>extra-testing</code> or <code>multilib-testing</code> as foreign; with none, it passes straight through to plain <code>pacman -Syu</code>. Its pre-flight refreshes a private snapshot of the sync databases, the way <code>checkupdates</code> does, so your real database is never refreshed without an upgrade. For each pending upgrade it judges the copy pacman will actually install, the first repository in <code>pacman.conf</code> order that carries it. If that copy is foreign, each version-constrained dependency must be satisfied either by what is installed (<code>pacman -T</code>) or by a package this same upgrade brings in (<code>pacman -Sddp</code>). A package that fails both is held with <code>--ignore</code>, and everything else upgrades in one <code>pacman -Syu</code>.</p>
+<p>If pacman still reports <code>installing X breaks dependency … required by Y</code>, <code>safeup</code> adds <code>X</code> to <code>--ignore</code> and retries, up to three times, so one ABI break does not block the whole upgrade. Here <code>X</code> is whatever pacman was installing, which can be a library, and each retry is still resolved by pacman as a whole. Every hold is printed and appended to <code>/var/log/safeup.log</code>, so it stays a deferred upgrade you can chase. <code>safeup --check</code> lists pending upgrades and the holds a real run would make, without root and without changing anything (it needs <code>fakeroot</code>, from <code>base-devel</code>). After a successful upgrade it runs <code>aur-rebuild-check</code>.</p>
+<p>The README states its limitation plainly: “<code>safeup</code> does not pre-check whether a package it holds is itself required by something else in the same transaction. It relies on pacman refusing, and then isolates the break.” It also cannot make Manjaro track Arch, or install a package that genuinely needs a newer library; holding it is the correct outcome. See <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a>.</p>
+</div>
+
+<h2 id="faq">Questions</h2>
+<details><summary>Is pacman --ignore a partial upgrade?</summary><p>Yes. Skipping any package during <code>pacman -Syu</code> leaves your system on a mix of versions the repositories never shipped together, and both the Arch and Manjaro wikis warn against it. What <code>--ignore</code> cannot do is install a set of packages with an unsatisfied declared dependency: pacman resolves the whole transaction and refuses instead. The risk that remains is holding a library while the packages built against it move on, so hold the dependent package, for one upgrade, and retry without the hold next time.</p></details>
+<details><summary>Why do chaotic-aur and BlackArch break Manjaro but not Arch?</summary><p>Both build against Arch’s current repositories. Manjaro Stable receives packages after roughly a couple of weeks of testing, so for a while the third-party package needs library versions Manjaro does not ship yet. On Arch the library and the rebuilt package arrive together.</p></details>
+<details><summary>Did the failed pacman -Syu change anything?</summary><p>No packages changed: “failed to prepare transaction” means pacman stopped before installing anything. The database refresh did happen: the <code>-y</code> step already ran, so your sync databases are now newer than your installed packages. Resolve the error and complete a full upgrade before installing anything else with <code>pacman -S</code>.</p></details>
+<details><summary>How long until Manjaro catches up?</summary><p>There is no fixed date. Manjaro’s wiki describes Stable packages as having gone through roughly a couple of weeks of testing on the Unstable and Testing branches. Retry a plain <code>pacman -Syu</code> after each Stable update and drop the hold as soon as it succeeds.</p></details>
+<details><summary>Should I switch to the Unstable branch to avoid this?</summary><p>It narrows the gap, since Unstable is synced with Arch several times a day, but Manjaro-specific packages such as kernels enter there before they have been tested. That is a trade-off to make deliberately, and after switching branches you must sync and upgrade with <code>pacman -Syu</code>.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/System_maintenance#Partial_upgrades_are_unsupported">System maintenance: Partial upgrades are unsupported</a> (<code>pacman -Sy <em>package</em></code>; <code>-Sy</code> then <code>-S</code>; completing a failed <code>-Syu</code>; <code>IgnorePkg</code>; symlinking; <code>checkupdates</code>)</li>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/Pacman#Skip_package_from_being_upgraded">pacman: Skip package from being upgraded</a> (<code>IgnorePkg</code>, one-off <code>--ignore</code> with a comma-separated list) and <a href="https://wiki.archlinux.org/title/Pacman#Querying_package_databases">Querying package databases</a> (<code>-Si</code>, <code>-Qi</code>)</li>
+<li>Manjaro Wiki, <a href="https://wiki.manjaro.org/index.php?title=System_Maintenance">System Maintenance: Avoiding Partial Updates</a> (no <code>-Sy</code>, no ignore list, <code>checkupdates</code>)</li>
+<li>Manjaro Wiki, <a href="https://wiki.manjaro.org/index.php?title=Switching_Branches">Switching Branches</a> (Stable, Testing and Unstable timing)</li>
+<li>Dibakar Ghosh, <a href="https://www.howtogeek.com/why-i-avoid-manjaro-even-though-i-love-arch-linux/">3 Reasons I Avoid Manjaro Even Though I Love Arch Linux</a>, How-To Geek, 1 September 2025: “on Manjaro, the necessary dependency might be running on an older version, which has some compatibility issues with the AUR package.”</li>
+<li>linux-aarhus, <a href="https://forum.manjaro.org/t/responsible-use-of-aur/86392">Responsible use of AUR</a>, Manjaro Linux Forum, 14 October 2021</li>
+<li><a href="https://github.com/doug445/manjaro-safeaur-updater#but-this-automates-pacman---ignore">manjaro-safeaur-updater README: “But this automates <code>pacman --ignore</code>”</a> (the transcript and the stated limitation)</li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>manjaro-safeaur-updater</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

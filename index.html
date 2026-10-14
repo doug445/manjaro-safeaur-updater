@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manjaro SafeAUR Updater: use the AUR without breakage</title>
+<meta name="description" content="Use the AUR on Manjaro without breaking your system: a guard against partial upgrades from Manjaro's lag behind Arch, a scan for AUR packages broken by a library bump, and pinned sources.">
+<link rel="canonical" href="https://doug445.github.io/manjaro-safeaur-updater/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="style.css">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Manjaro SafeAUR Updater">
+<meta property="og:title" content="Manjaro SafeAUR Updater: use the AUR on Manjaro without breaking your system">
+<meta property="og:description" content="pacman and yay wrappers that close the three failures behind most Manjaro AUR breakage: partial upgrades, stale sonames, and unpinned VCS sources. 93 tests against real pacman.">
+<meta property="og:url" content="https://doug445.github.io/manjaro-safeaur-updater/">
+<meta property="og:image" content="https://doug445.github.io/manjaro-safeaur-updater/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "Manjaro SafeAUR Updater",
+      "description": "pacman and yay wrappers for Manjaro: a partial-upgrade guard for foreign repositories, a post-upgrade scan for AUR packages broken by a library or python bump, a pinning policy for PKGBUILD VCS sources, and chroot builds via manjaro-chrootbuild.",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "Manjaro Linux",
+      "softwareVersion": "1.4.0",
+      "license": "https://opensource.org/licenses/MIT",
+      "url": "https://doug445.github.io/manjaro-safeaur-updater/",
+      "downloadUrl": "https://github.com/doug445/manjaro-safeaur-updater",
+      "codeRepository": "https://github.com/doug445/manjaro-safeaur-updater",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Why does the AUR break things on Manjaro?", "acceptedAnswer": { "@type": "Answer", "text": "The AUR assumes you are current with Arch, and Manjaro's Stable branch deliberately trails Arch. Packages built against Arch's newer libraries can need dependencies Manjaro does not have yet, and when Manjaro catches up, AUR packages you built against the older library stop resolving it." } },
+        { "@type": "Question", "name": "Doesn't automating pacman --ignore cause partial upgrades?", "acceptedAnswer": { "@type": "Answer", "text": "No. --ignore suppresses an upgrade, not dependency resolution: pacman still resolves the whole transaction and refuses one that would leave a dependency unsatisfied. The project's test suite proves this against real pacman transactions on every push." } },
+        { "@type": "Question", "name": "Does it work on Arch Linux?", "acceptedAnswer": { "@type": "Answer", "text": "It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable branch trailing Arch; on Arch itself there is no lag to guard against." } },
+        { "@type": "Question", "name": "Does it make the AUR safe?", "acceptedAnswer": { "@type": "Answer", "text": "No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a chroot is build isolation, not a security boundary. Read the PKGBUILD. The AUR is not supported by Arch or Manjaro." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="./">Manjaro SafeAUR Updater</a>
+    <a href="aur-package-broken-after-manjaro-update/">AUR broken after update</a>
+    <a href="manjaro-partial-upgrade-could-not-satisfy-dependencies/">Partial upgrades</a>
+    <a href="https://github.com/doug445/manjaro-safeaur-updater">GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Manjaro · AUR · pacman + yay</p>
+    <h1>Use the AUR on Manjaro without breaking your system</h1>
+    <p class="lede">
+      Six short bash scripts that wrap <code>pacman</code> and <code>yay</code> and close the
+      three failures behind almost every Manjaro AUR disaster: the <strong>partial upgrade</strong>
+      caused by Manjaro's lag behind Arch, the <strong>stale-soname breakage</strong> after Manjaro
+      catches up, and the <strong>unpinned VCS source</strong> that builds something other than
+      what you reviewed. No daemon. 93 tests, 46 of them real <code>pacman</code> transactions.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/doug445/manjaro-safeaur-updater">Get it on GitHub</a>
+      <a class="btn" href="#quick-start">Quick start</a>
+      <a class="btn" href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What it does not do</a>
+    </div>
+    <ul class="facts" aria-label="At a glance">
+      <li>v1.4.0</li><li>MIT</li><li>bash only</li><li>93 tests</li><li>manjaro-chrootbuild</li>
+      <li>Not affiliated with Manjaro</li>
+    </ul>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h2 id="problems">Fix a specific problem</h2>
+<div class="cards">
+  <a class="card" href="aur-package-broken-after-manjaro-update/"><strong>AUR package broken after a Manjaro update</strong><span>"error while loading shared libraries", stranded python packages, and finding everything that needs a rebuild.</span></a>
+  <a class="card" href="manjaro-partial-upgrade-could-not-satisfy-dependencies/"><strong>"could not satisfy dependencies" with chaotic-aur or BlackArch</strong><span>Why foreign repos outrun Manjaro, and how to hold the right package back.</span></a>
+</div>
+
+<h2 id="why">The gap nobody supports</h2>
+<p>
+  The AUR assumes you are current with Arch. Manjaro's Stable branch deliberately trails Arch by
+  roughly two weeks. Manjaro's own forum says the AUR is used "at your own risk and your own
+  responsibility". That's fair, but knowing the risk is yours only helps if you can see it.
+</p>
+<div class="table-scroll"><table>
+  <thead><tr><th>Failure</th><th>When it bites</th><th>What closes it</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Partial upgrade.</strong> A foreign binary repo (BlackArch, chaotic-aur) rebuilt a package against Arch's newer library; installing it drags in a dependency Manjaro can't satisfy yet.</td><td>While Manjaro is behind</td><td><code>safeup</code> holds only the foreign upgrades whose version-constrained dependencies can't be met yet, and logs every hold.</td></tr>
+    <tr><td><strong>Stale soname.</strong> Manjaro ships the new library, and AUR packages built against the old one die at runtime.</td><td>When Manjaro catches up</td><td><code>aur-rebuild-check</code> names every AUR package that needs rebuilding, python bumps included.</td></tr>
+    <tr><td><strong>Unpinned VCS source.</strong> <code>git+https://…</code> with no commit: what builds today isn't what you audited.</td><td>Any install or upgrade</td><td><code>aur-pin-check</code> refuses VCS sources not pinned to an immutable revision.</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="quick-start">Quick start</h2>
+<div class="codeblock"><pre><code>git clone https://github.com/doug445/manjaro-safeaur-updater.git
+cd manjaro-safeaur-updater
+./deploy.sh</code></pre></div>
+<div class="codeblock"><pre><code>safeup                 # pacman -Syu, with the partial-upgrade guard
+safeup --check         # what it would do: no root, nothing changed
+safeup --aur           # repo upgrade, then AUR updates, then the rebuild scan
+aurinstall &lt;pkg&gt;       # yay -S behind the pin-check gate, built in a chroot when possible
+aurupdate              # yay -Sua behind the pin-check gate
+aur-rebuild-check      # what needs rebuilding after a library or python bump</code></pre></div>
+<p><code>deploy.sh</code> asks before installing any missing dependency, and it is idempotent:
+  anything it replaces is backed up first.</p>
+
+<h2 id="ignore">"But this automates <code>pacman --ignore</code>"</h2>
+<p>
+  It does, and that deserves a real answer. <code>--ignore</code> suppresses an upgrade, not
+  dependency resolution. pacman still resolves the whole transaction and refuses one that would
+  leave a dependency unsatisfied, changing nothing. The project tests that against real pacman
+  on every push rather than asserting it, because the whole safety argument rests on it. The
+  <a href="manjaro-partial-upgrade-could-not-satisfy-dependencies/">partial-upgrade guide</a>
+  shows the transcript.
+</p>
+
+<h2 id="chroot">Builds against the libraries you actually run</h2>
+<p>
+  <code>aurinstall</code> builds in Manjaro's own
+  <a href="https://gitlab.manjaro.org/tools/development-tools/manjaro-chrootbuild">manjaro-chrootbuild</a>
+  by default. linux-aarhus of the Manjaro team suggested it. The chroot is synced to your Manjaro
+  branch, so the package links against the libraries you run rather than whatever the AUR assumed.
+  That fixes stale-soname breakage at build time. AUR dependency chains are built dependencies
+  first, and every link in the chain is pin-checked.
+</p>
+
+<h2 id="not">What it does not do</h2>
+<ul>
+  <li>It doesn't make Manjaro track Arch. If you want Arch's timing, run Arch.</li>
+  <li>It doesn't audit what a PKGBUILD <em>does</em>. Pinning proves you build the commit you
+    reviewed, not that the commit is benign.</li>
+  <li>A chroot is build isolation, not a security boundary.</li>
+  <li>It doesn't replace backups or snapshots.</li>
+</ul>
+
+<h2 id="faq">FAQ</h2>
+<details>
+  <summary>Why does the AUR break things on Manjaro?</summary>
+  <p>The AUR assumes you are current with Arch, and Manjaro's Stable branch deliberately trails
+    Arch. Packages built against Arch's newer libraries can need dependencies Manjaro does not have
+    yet, and when Manjaro catches up, AUR packages you built against the older library stop
+    resolving it.</p>
+</details>
+<details>
+  <summary>Doesn't automating pacman --ignore cause partial upgrades?</summary>
+  <p>No. --ignore suppresses an upgrade, not dependency resolution: pacman still resolves the whole
+    transaction and refuses one that would leave a dependency unsatisfied. The project's test suite
+    proves this against real pacman transactions on every push.</p>
+</details>
+<details>
+  <summary>Does it work on Arch Linux?</summary>
+  <p>It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable
+    branch trailing Arch; on Arch itself there is no lag to guard against.</p>
+</details>
+<details>
+  <summary>Does it make the AUR safe?</summary>
+  <p>No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a
+    chroot is build isolation, not a security boundary. Read the PKGBUILD. The AUR is not
+    supported by Arch or Manjaro.</p>
+</details>
+
+<p><small>Not for beginners: everything here assumes you can read a PKGBUILD and recover your own
+  system. The project's README says how it was built, AI assistance included.</small></p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Manjaro SafeAUR Updater</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater/releases">Releases</a></p>
+    <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

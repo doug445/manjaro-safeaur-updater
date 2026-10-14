@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AUR package broken after Manjaro update? Find and rebuild it</title>
+<meta name="description" content="AUR app failing with “cannot open shared object file” after a Manjaro update? Manjaro shipped a new soname or Python. Find the stale packages and rebuild them.">
+<link rel="canonical" href="https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Manjaro SafeAUR Updater">
+<meta property="og:title" content="AUR package broken after Manjaro update? Find and rebuild it">
+<meta property="og:description" content="AUR app failing with “cannot open shared object file” after a Manjaro update? Manjaro shipped a new soname or Python. Find the stale packages and rebuild them.">
+<meta property="og:url" content="https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/">
+<meta property="og:image" content="https://doug445.github.io/manjaro-safeaur-updater/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "AUR package stopped working after a Manjaro update: “cannot open shared object file”",
+      "description": "AUR app failing with “cannot open shared object file” after a Manjaro update? Manjaro shipped a new soname or Python. Find the stale packages and rebuild them.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/manjaro-safeaur-updater/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/",
+      "about": { "@type": "SoftwareApplication", "name": "manjaro-safeaur-updater", "url": "https://doug445.github.io/manjaro-safeaur-updater/", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Manjaro Linux" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Manjaro SafeAUR Updater", "item": "https://doug445.github.io/manjaro-safeaur-updater/" },
+        { "@type": "ListItem", "position": 2, "name": "AUR broken after update", "item": "https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Why didn’t pacman warn me that my AUR package would break?", "acceptedAnswer": { "@type": "Answer", "text": "pacman checks the dependencies a package declares, and an AUR package often declares a plain, unversioned dependency such as libfoo, which the new version still satisfies. The broken link is the soname recorded inside the binary, and pacman does not inspect that. Rebuilding locally built packages after a library update is left to you." } },
+        { "@type": "Question", "name": "Can I symlink the old .so name to the new library?", "acceptedAnswer": { "@type": "Answer", "text": "No. A library gets a new soname when it is not backwards compatible, so the program would load a library with a different ABI from the one it was built for. The Arch wiki says explicitly not to fix missing libraries by symlinking. Rebuild the package instead." } },
+        { "@type": "Question", "name": "Should I rebuild before or after the Manjaro update?", "acceptedAnswer": { "@type": "Answer", "text": "After. A build links against the libraries installed when it runs, so rebuilding before Manjaro ships the new library just rebuilds against the old one. Complete sudo pacman -Syu first, then rebuild." } },
+        { "@type": "Question", "name": "Does a -bin AUR package need rebuilding?", "acceptedAnswer": { "@type": "Answer", "text": "Rebuilding a -bin package repackages the same prebuilt upstream binary, so it cannot change what that binary links against. If a -bin package reports a missing library, first check whether the package ships that library itself. If it does not, you need a newer upstream release, the missing library installed, or the source-built package instead." } },
+        { "@type": "Question", "name": "How do I find AUR packages built for an old Python version?", "acceptedAnswer": { "@type": "Answer", "text": "List the versioned directories with ls -d /usr/lib/python3.* and compare them with python --version. For any older directory, pacman -Qoq /usr/lib/python3.12 (with that version number) lists the packages that still own files there. Those need rebuilding against the current interpreter." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">Manjaro SafeAUR Updater</a>
+    <a href="../aur-package-broken-after-manjaro-update/">AUR broken after update</a>
+    <a href="../manjaro-partial-upgrade-could-not-satisfy-dependencies/">Partial upgrades</a>
+    <a href="https://github.com/doug445/manjaro-safeaur-updater">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">Manjaro SafeAUR Updater</a> › AUR broken after update</p>
+<h1>AUR package stopped working after a Manjaro update: “cannot open shared object file”</h1>
+<p class="lede">An AUR program that worked last week now dies with <code>error while loading shared libraries: libfoo.so.1: cannot open shared object file: No such file or directory</code>, or, if it is written in Python, with <code>No module named …</code>. The only thing that changed was a Manjaro update. This page explains why, shows how to find every affected package by hand, and how to rebuild them so they stay fixed.</p>
+
+<h2 id="why">Why a Manjaro update breaks AUR packages</h2>
+<p>pacman upgrades packages that come from a repository. An AUR package was built on your machine and installed with <code>pacman -U</code>; from then on it is a <em>foreign</em> package, and nothing in a repository upgrade rebuilds it. The Arch wiki is explicit that this is your job: “If packages in the official repositories are updated, you will need to rebuild any AUR packages that depend on those libraries.” Manjaro’s wiki puts it more bluntly in its AUR article: “When Manjaro is updated, AUR packages might stop working.”</p>
+
+<h3>Compiled programs: the old soname is gone</h3>
+<p>When a library makes an incompatible change it gets a new soname: <code>libfoo.so.1</code> becomes <code>libfoo.so.2</code>. Arch ships only one version of each shared library, and Manjaro’s repositories follow it, so the upgrade removes <code>libfoo.so.1</code>. A binary built against the old library still names it in a <code>DT_NEEDED</code> entry of its dynamic section. The dynamic loader looks for exactly that name, does not find it, and the program fails to start with the error above.</p>
+<p>pacman sees nothing wrong. The package is installed, its files are present, and a dependency declared as plain <code>libfoo</code> is still satisfied by the new version.</p>
+
+<h3>Why Manjaro makes the timing worse</h3>
+<p>The AUR targets current Arch. Manjaro’s Stable branch deliberately does not: packages reach it after “roughly a couple of weeks testing by the users of the Unstable/Testing repos”, in the words of Manjaro’s branch documentation. The AUR side of a library transition therefore happens on Arch’s schedule and your side happens on Manjaro’s.</p>
+<p>That gap removes the usual safety net. If an AUR maintainer bumps <code>pkgrel</code> to rebuild against Arch’s new library, your AUR helper picks that up while you still have the old library and builds against the old one. When Manjaro finally ships the new library, there is no new AUR release to prompt another build. Nothing tells you. A program may fail at once, or only the next time it loads the plugin that links the missing library.</p>
+
+<h3>Python packages: stranded in the old site-packages</h3>
+<p>A pure-Python AUR package has no ELF file to fail. It installs into a versioned directory such as <code>/usr/lib/python3.12/site-packages</code>, and when Manjaro moves <code>python</code> to a new minor version the interpreter stops looking there. The package is still installed; it is never imported again. The symptom is <code>ModuleNotFoundError: No module named '…'</code> from whatever imports it, and the Arch wiki states that a package “built with previous Python version must be rebuilt against the new one in order to be properly used.”</p>
+
+<h2 id="find">Find the affected packages by hand</h2>
+
+<h3>1. List the packages pacman did not install from a repository</h3>
+<div class="codeblock"><pre><code>pacman -Qm</code></pre></div>
+<p>This lists foreign packages: everything from the AUR, plus anything you installed by hand or that has since been dropped from the repositories. <code>pacman -Qmq</code> prints the names only, which is what the next step uses.</p>
+
+<h3>2. Run <code>ldd</code> over every file they own</h3>
+<div class="codeblock"><pre><code>for p in $(pacman -Qmq); do
+  pacman -Qlq "$p" | while read -r f; do
+    [ -f "$f" ] &amp;&amp; ldd "$f" 2&gt;/dev/null | grep -q '=&gt; not found' &amp;&amp; echo "$p  $f"
+  done
+done</code></pre></div>
+<p><code>pacman -Qlq</code> lists each package’s files, <code>[ -f ]</code> skips the directories, and <code>ldd</code> prints <code>libfoo.so.1 =&gt; not found</code> for every <code>DT_NEEDED</code> entry it cannot resolve. Each line of output names a package and one of its files. Files that are not dynamic ELF objects make <code>ldd</code> fail, and <code>2&gt;/dev/null</code> hides that. The loop runs <code>ldd</code> on every file, so it is slow if you have many AUR packages.</p>
+<p>To see which library a flagged file is missing:</p>
+<div class="codeblock"><pre><code>ldd /path/from/the/output | grep 'not found'</code></pre></div>
+<div class="note">
+<p><strong>Two false positives.</strong> Some prebuilt applications, often <code>-bin</code> packages, ship private libraries in their own directory and find them through an <code>$ORIGIN</code> RPATH on the main executable. Standalone <code>ldd</code> on one of their plugins cannot see that path and reports the sibling library as missing. If <code>pacman -Qlq &lt;pkg&gt; | grep libbar.so</code> shows the package ships that file itself, it is not a break. Separately, a component may reference an optional library that is never actually loaded.</p>
+<p>The <code>ldd</code>(1) man page warns that <code>ldd</code> may execute the program it inspects. That is acceptable for packages you installed and already run; do not point it at files you have not.</p>
+</div>
+
+<h3>3. Look for a previous Python’s directory</h3>
+<div class="codeblock"><pre><code>python --version
+ls -d /usr/lib/python3.*</code></pre></div>
+<p>If there is a <code>python3.X</code> directory other than the one for your current version, ask pacman who still owns it, substituting the stale version number:</p>
+<div class="codeblock"><pre><code>pacman -Qoq /usr/lib/python3.12</code></pre></div>
+<p>Every package listed was built for an interpreter you no longer have. After a full upgrade the repository packages have moved to the new directory, so what remains is normally AUR packages.</p>
+
+<h3>Or let <code>checkrebuild</code> do it</h3>
+<p>The Arch wiki points to the <code>rebuild-detector</code> package for exactly this job: its <code>checkrebuild</code> tool, and a pacman hook, “can help find packages needing rebuilt.”</p>
+<div class="codeblock"><pre><code>sudo pacman -S rebuild-detector
+checkrebuild</code></pre></div>
+
+<h2 id="fix">Fix: rebuild against the libraries you now run</h2>
+<ol>
+<li><strong>Finish the system upgrade first.</strong> A build links against whatever is installed when it runs. Rebuilding before Manjaro ships the new library rebuilds the problem. Run <code>sudo pacman -Syu</code>, then rebuild.</li>
+<li><strong>Rebuild each flagged package.</strong> From a fresh clone of its AUR repository (for a split package, clone the package base):
+<div class="codeblock"><pre><code>git clone https://aur.archlinux.org/package_name.git
+cd package_name
+makepkg -si</code></pre></div>
+<code>-s</code> installs build dependencies from the repositories and <code>-i</code> installs the result. <code>makepkg -s</code> does not fetch AUR dependencies, so if one broken AUR package depends on another, rebuild the dependency first. In an existing clone, <code>git pull</code>, then <code>git clean -dfx</code> to remove the old build, then <code>makepkg -si</code>. Your AUR helper can do the same job, provided it really rebuilds rather than deciding the installed version is already current.</li>
+<li><strong>Do not symlink the old soname.</strong> The Arch wiki is direct about this: “do not "fix" the problem simply by symlinking. Libraries receive soname bumps when they are not backwards compatible.”</li>
+</ol>
+
+<h3>Why it matters where you build</h3>
+<p><code>makepkg</code> on your own system links against everything installed there, including newer libraries pulled in from a third-party repository or the AUR. That can produce a package linked to a soname Manjaro Stable does not ship, which breaks again as soon as Manjaro’s version replaces it. A clean chroot synced to <em>your</em> Manjaro branch links only against what that branch provides, and its build dependencies never touch your system. A chroot synced to Arch would defeat the purpose.</p>
+<p>Manjaro’s own tool for this is <code>chrootbuild</code>, from the <code>manjaro-chrootbuild</code> package. Its default branch is <code>unstable</code>, and building against the wrong branch still succeeds, so always pass yours explicitly:</p>
+<div class="codeblock"><pre><code>pacman-mirrors --get-branch
+git clone https://aur.archlinux.org/package_name.git
+sudo chrootbuild -p package_name -b stable</code></pre></div>
+<p>Run <code>chrootbuild</code> from the directory that contains the clone, and replace <code>stable</code> with what <code>pacman-mirrors --get-branch</code> printed. The package lands in <code>PKGDEST</code> if your <code>makepkg.conf</code> sets one, otherwise in the directory you started from; install it with <code>sudo pacman -U</code>. <code>chrootbuild</code> does not resolve AUR dependencies. Build those first, or chain them in one run with <code>-n</code>, which installs each built package into the chroot so the next can build against it: <code>-p dep -n -p package_name</code>.</p>
+
+<h2 id="automated">Automating the check</h2>
+<div class="tool">
+<p><strong>Automated:</strong> <code>aur-rebuild-check</code>, part of <a href="https://github.com/doug445/manjaro-safeaur-updater">manjaro-safeaur-updater</a>, does the find step above. For every package in <code>pacman -Qmq</code> it runs <code>ldd</code> over each file the package owns, recognising ELF objects by their magic bytes rather than their names, so binaries under <code>/opt/&lt;app&gt;/</code> are checked too. It also flags any package with files under a <code>/usr/lib/python3.X/</code> that is not the installed Python’s. It drops the two false positives: a missing soname the package ships itself (resolved at runtime through an <code>$ORIGIN</code> RPATH), and sonames listed, space-separated, in <code>AUR_REBUILD_IGNORE_SONAMES</code> (<code>libjvm.so</code> is ignored by default). It exits 1 when something needs rebuilding, <code>--quiet</code> keeps it silent when nothing does, and <code>safeup</code> runs it after every successful upgrade.</p>
+<p>With <code>--fix</code> it offers <code>yay -S --rebuild</code> for the flagged set, but only after <code>aur-pin-check</code> has passed every package in it: a rebuild fetches the current PKGBUILD, and one whose VCS source is not pinned to an immutable revision is refused rather than rebuilt. The prompt defaults to no; <code>--noconfirm</code> skips it and is passed on to <code>yay</code>.</p>
+<p>For prevention, <code>aurinstall</code> builds new AUR packages in Manjaro’s <code>chrootbuild</code> by default, always with an explicit <code>-b</code> branch taken from <code>pacman-mirrors --get-branch</code>, and says why whenever it falls back to <code>yay</code> (no <code>manjaro-chrootbuild</code>, a dependency chain it cannot resolve, or a <code>-bin</code> package). None of this can fix a package that genuinely needs a newer library than your branch has; the README’s <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a> lists the limits.</p>
+</div>
+
+<h2 id="faq">Questions</h2>
+<details><summary>Why didn’t pacman warn me that my AUR package would break?</summary><p>pacman checks the dependencies a package declares, and an AUR package often declares a plain, unversioned dependency such as libfoo, which the new version still satisfies. The broken link is the soname recorded inside the binary, and pacman does not inspect that. Rebuilding locally built packages after a library update is left to you.</p></details>
+<details><summary>Can I symlink the old .so name to the new library?</summary><p>No. A library gets a new soname when it is not backwards compatible, so the program would load a library with a different ABI from the one it was built for. The Arch wiki says explicitly not to fix missing libraries by symlinking. Rebuild the package instead.</p></details>
+<details><summary>Should I rebuild before or after the Manjaro update?</summary><p>After. A build links against the libraries installed when it runs, so rebuilding before Manjaro ships the new library just rebuilds against the old one. Complete <code>sudo pacman -Syu</code> first, then rebuild.</p></details>
+<details><summary>Does a -bin AUR package need rebuilding?</summary><p>Rebuilding a -bin package repackages the same prebuilt upstream binary, so it cannot change what that binary links against. If a -bin package reports a missing library, first check whether the package ships that library itself. If it does not, you need a newer upstream release, the missing library installed, or the source-built package instead.</p></details>
+<details><summary>How do I find AUR packages built for an old Python version?</summary><p>List the versioned directories with <code>ls -d /usr/lib/python3.*</code> and compare them with <code>python --version</code>. For any older directory, <code>pacman -Qoq /usr/lib/python3.12</code> (with that version number) lists the packages that still own files there. Those need rebuilding against the current interpreter.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/Arch_User_Repository#Updating_packages">Arch User Repository: Updating packages</a> (rebuilding after library updates; <code>checkrebuild</code>, <code>rebuild-detector</code>) and <a href="https://wiki.archlinux.org/title/Arch_User_Repository#Build_the_package">Build the package</a> (<code>git clone</code>, <code>makepkg -s</code>/<code>-i</code>, <code>git clean -dfx</code>)</li>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/System_maintenance#Partial_upgrades_are_unsupported">System maintenance: Partial upgrades are unsupported</a> (do not fix soname breakage by symlinking), <a href="https://wiki.archlinux.org/title/System_maintenance#Check_for_orphans_and_dropped_packages">Check for orphans and dropped packages</a> (<code>pacman -Qm</code>) and <a href="https://wiki.archlinux.org/title/System_maintenance#Be_careful_with_unofficial_packages">Be careful with unofficial packages</a> (<code>rebuild-detector</code>)</li>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/Frequently_asked_questions#Why_is_there_only_a_single_version_of_each_shared_library_in_the_official_repositories?">FAQ: Why is there only a single version of each shared library</a></li>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/Python#Module_not_found_after_Python_version_update">Python: Module not found after Python version update</a> and <a href="https://wiki.archlinux.org/title/Python#List_packages_built_for_a_specific_Python_version">List packages built for a specific Python version</a> (<code>pacman -Qoq /usr/lib/python3.12</code>)</li>
+<li>Arch Wiki, <a href="https://wiki.archlinux.org/title/Pacman#Querying_package_databases">pacman: Querying package databases</a> (<code>-Ql</code>, <code>-Qo</code>)</li>
+<li>Manjaro Wiki, <a href="https://wiki.manjaro.org/index.php?title=Arch_User_Repository">Arch User Repository</a> (“When Manjaro is updated, AUR packages might stop working”; building by hand with <code>makepkg</code>)</li>
+<li>Manjaro Wiki, <a href="https://wiki.manjaro.org/index.php?title=Switching_Branches">Switching Branches</a> (Stable’s couple of weeks of testing) and <a href="https://wiki.manjaro.org/index.php?title=Pacman-mirrors">Pacman-mirrors</a> (<code>pacman-mirrors --get-branch</code>)</li>
+<li>linux-aarhus, <a href="https://forum.manjaro.org/t/need-to-know-about-manjaro-and-aur/103617">[Need-To-Know] About Manjaro and AUR</a>, Manjaro Linux Forum, 23 February 2022: “any CUSTOM package may cease to function without warning”</li>
+<li>Dibakar Ghosh, <a href="https://www.howtogeek.com/why-i-avoid-manjaro-even-though-i-love-arch-linux/">3 Reasons I Avoid Manjaro Even Though I Love Arch Linux</a>, How-To Geek, 1 September 2025</li>
+<li><a href="https://github.com/doug445/manjaro-safeaur-updater#readme">manjaro-safeaur-updater README</a> (<code>aurinstall</code> and <code>chrootbuild</code>: branch default, <code>-n</code> chaining, <code>PKGDEST</code>)</li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>manjaro-safeaur-updater</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/manjaro-safeaur-updater/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>
