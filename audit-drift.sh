@@ -2,8 +2,9 @@
 # audit-drift.sh — compare deployed files against their source-of-record.
 #
 # For each (source, deployed) pair in this suite, diff by hash. Any mismatch
-# means one side was edited without syncing — exactly the foot-gun that
-# feedback_deployed_copy_canonical.md warned about.
+# means one side was edited without syncing — exactly the foot-gun this
+# exists to catch: an edit made only to the deployed copy is lost the next
+# time deploy.sh runs.
 #
 # Output to stdout (for journalctl), plus notify-send if interactive and
 # drift is found. Exits 0 if clean, 1 if drift, 2 on missing files.
