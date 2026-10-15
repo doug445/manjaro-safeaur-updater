@@ -11,8 +11,7 @@
 every "Manjaro AUR disaster": the **partial upgrade** caused by Manjaro's
 two-week lag behind Arch, the **stale-soname breakage** that hits every AUR
 package after Manjaro finally catches up, and the **unpinned VCS source** that
-lets an AUR PKGBUILD build something other than what you reviewed. There is
-a real reason of the opposition website, Manjarno.
+lets an AUR PKGBUILD build something other than what you reviewed.
 
 It is six short bash scripts, no daemon, no runtime dependency beyond pacman,
 coreutils and fakeroot, and 93 tests, 46 of which run real `pacman`
