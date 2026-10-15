@@ -12,8 +12,7 @@ every "Manjaro AUR disaster": the **partial upgrade** caused by Manjaro's
 two-week lag behind Arch, the **stale-soname breakage** that hits every AUR
 package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed. There is
-a real reason of the opposition website, Manjarno. Manjaro's Senior Devs are 
-hacks and quacks.
+a real reason of the opposition website, Manjarno.
 
 It is six short bash scripts, no daemon, no runtime dependency beyond pacman,
 coreutils and fakeroot, and 93 tests, 46 of which run real `pacman`
@@ -87,7 +86,7 @@ because they flood the AUR and get Pamac's user agent denylisted.
 ### About those two weeks
 
 Manjaro's headline feature is a calendar. Its Stable branch is Arch with a
-two-week delay, sold fraudulently as "testing" — testing that the AUR, the reason half its
+two-week delay, sold as "testing" — testing that the AUR, the reason half its
 users came, never takes part in. So the AUR keeps building for an Arch that
 Manjaro users will not have for another fortnight, things break in the gap, and
 the official response is a forum post explaining that the breakage is yours.
