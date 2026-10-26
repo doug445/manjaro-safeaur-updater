@@ -50,7 +50,9 @@ are checked by anything you have installed today.
 upgrade something because its dependency is not satisfiable yet, that is the
 tool working. It logs it, tells you why, and moves on with the rest of the
 upgrade. The alternative — forcing it through — is precisely the mechanism that
-produces the disasters.
+produces the disasters. What gets held is only ever a foreign package. A Manjaro
+library is never held back: when its upgrade breaks an AUR package, the repo
+upgrade lands and the AUR package — the one that is out of date — is rebuilt.
 
 **A skipped check is never a passed check.** Every gate here either succeeds,
 fails, or reports that it could not run. Nothing is silently counted as fine
@@ -67,7 +69,10 @@ bypass a decision you make, not a default you never noticed.
 **It does not pretend to be more than it is.** Pinning a source proves you will
 build the commit you reviewed. It makes no claim about whether that commit is
 safe, and the README says so in a section devoted to what the suite does not do.
-The three failure modes above are closed completely. Manjaro, in general, is not
+The PKGBUILD is read as well, so a `.SRCINFO` that hides a source is caught, but
+a PKGBUILD is code, and only reading it tells you what it does — which is why
+yay's diff menu stays on. The three failure modes above are closed completely
+against a careless maintainer. Manjaro, in general, is not
 "fixed" — the lag is a design decision, and this handles its consequences.
 
 ## How it is tested
@@ -99,9 +104,10 @@ Anyone running Manjaro who uses the AUR and would like to keep using it. It is
 most valuable if you also have BlackArch or chaotic-aur enabled, because those
 track Arch directly and therefore feel the lag hardest.
 
-It is not for you if you run Arch itself. Nothing here would hurt, but the
-partial-upgrade guard has no lag to guard against, and Arch already gives you
-the timing the AUR assumes.
+It is not for you if you run Arch itself, or EndeavourOS. Nothing here would
+hurt, but the partial-upgrade guard has no lag to guard against, and both
+already give you the timing the AUR assumes. If you have not installed yet,
+install [EndeavourOS](https://endeavouros.com/) and skip the problem.
 
 ## Relationship to the author's other projects
 

@@ -1,6 +1,6 @@
 # Security Policy
 
-**Manjaro SafeAUR Updater 1.5.0**
+**Manjaro SafeAUR Updater 1.6.0**
  
 ## Supported Versions
 
@@ -62,9 +62,11 @@ to install. That is the interesting surface:
 
 * **A gate that passes when it should fail.** `aur-pin-check` is the only thing
   standing between `aurinstall`/`aurupdate` and an unpinned VCS source. Any
-  `source=` line that reaches `yay` without either a `#commit=<40-hex>` fragment
-  or a *currently verifying* allowlist row is a vulnerability, not a parsing
-  quirk. **A skipped check counted as a pass is the same bug**: a package that
+  `source=` line that reaches `yay` or `chrootbuild` — in a named package or in
+  any AUR dependency the build pulls in — without either a `#commit=<40-hex>`
+  fragment or a *currently verifying* allowlist row is a vulnerability, not a
+  parsing quirk. So is a PKGBUILD whose source arrays name an unpinned VCS
+  source its `.SRCINFO` hides, getting through. **A skipped check counted as a pass is the same bug**: a package that
   could not be fetched, parsed or resolved must be reported as an error and must
   never exit 0.
 * **The allowlist failing to notice a moved tag.** The allowlist's entire value
@@ -81,22 +83,25 @@ to install. That is the interesting surface:
   `.SRCINFO` — the post-evaluation static form — precisely so that vetting an
   untrusted package name never runs that package's code. Any change that
   sources, evals, or otherwise executes PKGBUILD content, or that lets
-  `.SRCINFO` content reach a shell as code, is in scope. Package names come
-  from the command line and from `yay -Qua`; `.SRCINFO` bodies come from the
-  network. Neither is trusted input.
+  `.SRCINFO` or PKGBUILD content reach a shell as code, is in scope. The
+  PKGBUILD is read as text only. Package names come from the command line and
+  from `yay -Qua`; `.SRCINFO` and PKGBUILD bodies come from the network. None
+  of it is trusted input.
 * **Argument injection into pacman or yay.** Package names flow into `pacman
-  -Si`, `pacman -T`, `--ignore` lists and `yay -S`. A crafted name that becomes
+  -Si`, `pacman -T`, `--ignore` lists, `--assume-installed` and `yay -S`. A crafted name that becomes
   an *option* rather than an operand — anything that could turn into
   `--noconfirm`, `--overwrite`, `-U`, a second `--config`, or a path — is a
   vulnerability.
-* **`safeup`'s auto-hold selecting the wrong packages.** The recovery path
-  parses pacman's own output with a regular expression and feeds the result into
-  `--ignore`. A pattern that over-matches silently holds back packages you
-  needed — including security updates, which is the serious case — and one that
-  under-matches strands the upgrade. Both are in scope. So is anything that
-  causes the retry loop to report success on a transaction that did not happen.
-* **A hold that is not reported.** Every held or auto-skipped package must reach
-  both the terminal and `/var/log/safeup.log`. A package held silently is a
+* **`safeup`'s recovery path standing in for the wrong dependency.** It parses
+  pacman's own `breaks dependency … required by Y` output and, for an AUR `Y`,
+  feeds the dependency into `--assume-installed`. Standing in for a dependency
+  of a REPOSITORY package — hiding a real repo inconsistency — is in scope; so
+  is a pattern that over-matches and waves through breaks nobody reported, and
+  anything that causes the retry loop to report success on a transaction that
+  did not happen. So is any path that holds back a repository package.
+* **A hold or a needed rebuild that is not reported.** Every held package, and
+  every AUR package left needing a rebuild, must reach both the terminal and
+  `/var/log/safeup.log`. A package held silently is a
   package you will still be running, unpatched, in six months without knowing.
 * **`ldd` on attacker-supplied binaries.** `aur-rebuild-check` runs `ldd` over
   every file owned by every foreign package. `ldd` is not unconditionally safe

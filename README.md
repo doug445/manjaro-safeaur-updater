@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Free and open source](https://img.shields.io/badge/Free%20and%20open%20source-brightgreen.svg)](LICENSE)
 [![Shell: bash](https://img.shields.io/badge/shell-bash-4EAA25.svg)](#requirements)
-[![Tests: 93](https://img.shields.io/badge/tests-93%20passing-brightgreen.svg)](#testing)
+[![Tests: 108](https://img.shields.io/badge/tests-108%20passing-brightgreen.svg)](#testing)
 [![No runtime deps](https://img.shields.io/badge/runtime%20deps-pacman%20%2B%20coreutils-lightgrey.svg)](#requirements)
 
 **Use the AUR on Manjaro without breaking your system.** A small suite of
@@ -25,7 +25,7 @@ lets an AUR PKGBUILD build something other than what you reviewed.
 > AUR from breaking it.
 
 It is six short bash scripts, no daemon, no runtime dependency beyond pacman,
-coreutils and fakeroot, and 93 tests, 46 of which run real `pacman`
+coreutils and fakeroot, and 108 tests, 49 of which run real `pacman`
 transactions on a loop device.
 
 **Guides:** [AUR package broken after a Manjaro update](https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/) ·
@@ -150,6 +150,13 @@ locked out of the AUR it advertises, and answers both with a disclaimer has not
 earned the word "Stable" on its branch. If that is not good enough for you,
 the answer is at the top of this page.
 
+**To linux-aarhus:** two of this suite's best ideas are yours — the chroot
+build and the `-n` chain — and they are credited as yours. Our private
+exchange went badly, and I would rather fix that than keep score. If you are
+willing, message me on the Manjaro forum, where we last spoke, or at the
+address in [LICENSE](LICENSE). And if anything on this page is wrong, tell me
+and I will correct it.
+
 ### About those two weeks
 
 Manjaro's headline feature is a calendar. Its Stable branch is Arch with a
@@ -179,9 +186,10 @@ AUR itself.
 
 ### How honest is "solves it completely"?
 
-Completely, for the first two failures above — that is what the test suite
-demonstrates, package by package. Not yet completely for the third: the pin
-check has [known gaps](#known-gaps-in-the-pin-check), being fixed. And not
+Completely, for the three failures above — that is what the test suite
+demonstrates, package by package. For the third, that means against a careless
+or drifting maintainer, not a hostile one: see
+[What the pin check cannot do](#what-the-pin-check-cannot-do). And not
 completely for Manjaro in general. Read
 [What this does not do](#what-this-does-not-do) before you rely on it.
 
@@ -231,22 +239,32 @@ system afterwards.
 
 Beyond that guarantee, **what** gets held matters:
 
-- It only holds a package whose version-constrained dependency is **already
-  unsatisfiable** — one that cannot install correctly at that moment regardless.
+- It only holds a package from a **foreign** repo whose version-constrained
+  dependency is **already unsatisfiable** — one that cannot install correctly
+  at that moment regardless. A Manjaro repo package is never held.
 - It holds the **new** version back, so the package keeps the dependencies it
   already had and stays in the state it was already working in. The classic
   dangerous pattern is pinning a *library* while upgrading its dependents; this
   is the opposite direction.
+- When a Manjaro upgrade breaks an **AUR** package's dependency
+  (`installing X breaks dependency … required by Y`), the library still goes
+  ahead. The repo upgrade lands in full, with `--assume-installed` standing in
+  for Y's stale dependency, and Y is named for a rebuild; `safeup --aur`
+  rebuilds it straight away. The AUR package is the one that is out of date,
+  so it is the one left broken until it is rebuilt. If Y comes from a repo,
+  the mirrors disagree mid-sync: nothing changes and `safeup` says to wait.
+  (Up to 1.5.0 this path held the library — the very pattern above.)
 - The realistic alternative is not a clean full upgrade. It is a refused
   transaction, or a person reaching for `--ignore` by hand with worse aim.
-- Every hold is printed and written to `/var/log/safeup.log`. A silent
+- Every hold, and every AUR package left needing a rebuild, is printed and
+  written to `/var/log/safeup.log`. A silent
   indefinite pin is the real long-term hazard, so a hold is made into a
   *deferred* upgrade you can chase rather than a package that quietly stops
   updating.
 
 **The limitation, stated plainly:** `safeup` does not pre-check whether a
 package it holds is itself required by something else in the same transaction.
-It relies on pacman refusing, and then isolates the break. The transcript above
+It relies on pacman refusing, and then acts on pacman's own message. The transcript above
 is why that is acceptable — but it works that way because pacman is sound, not
 because this script is clever, and you should know which of those you are
 trusting.
@@ -264,9 +282,10 @@ cd manjaro-safeaur-updater
 `deploy.sh` installs any missing dependency (asking first; a package your
 repositories do not carry is skipped with a warning, not fatal), copies the six
 tools into `/usr/local/bin`, installs the logrotate rule and the monthly
-drift-audit timer, and stops. It also offers a yay config that switches off
-yay's per-package diff/edit/clean menus — `aur-pin-check` is the gate — and
-never replaces an existing one without showing the diff and asking. It is
+drift-audit timer, and stops. It also offers a yay config that keeps yay's
+PKGBUILD diff menu on — a pin proves *which* source builds, only reading it
+tells you what it does — and switches off the edit and clean menus. It never
+replaces an existing config without showing the diff and asking. It is
 idempotent: a file that already matches is not rewritten, and anything it does
 replace is backed up to `<path>.bak-YYYYmmdd-HHMMSS` first.
 
@@ -295,11 +314,11 @@ alias yupdate='safeup ; aurupdate'
 
 | Tool | Wraps | What it adds |
 |---|---|---|
-| **`safeup`** | `pacman -Syu` | Auto-detects foreign repos from `pacman.conf` (anything outside `core`/`extra`/`multilib`/`community` and their `-testing` variants). Judges each pending upgrade by the copy pacman will actually install — the first repo in `pacman.conf` order that carries it — and holds a foreign one whose version-constrained dependency is satisfied neither now (`pacman -T`) nor by the same upgrade (`pacman -Sddp`). The pre-flight runs against a private snapshot of the sync databases, so the real one is never refreshed without being upgraded. Recovers from `installing X breaks dependency … required by Y` by holding `X` and retrying, so one ABI break does not block the whole upgrade. `--check` reports without root and changes nothing; `--aur` chains `aurupdate` after a clean repo upgrade. Chains into `aur-rebuild-check` on success. Logs every hold to `/var/log/safeup.log`. |
-| **`aur-rebuild-check`** | — | `ldd`s every ELF owned by every `pacman -Qmq` package — found by magic bytes, so `/opt/<app>/<exe>` counts — and reports `=> not found`. Also flags a package with files under a `/usr/lib/python3.X/` that is not the installed python's: the pure-Python breakage a soname scan cannot see. Filters the two false positives that otherwise flag `-bin` packages forever: privately bundled libraries resolved through an `$ORIGIN` RPATH, and optional sonames named in `AUR_REBUILD_IGNORE_SONAMES`. `--fix` offers `yay -S --rebuild`, after `aur-pin-check` has passed the set. |
-| **`aur-pin-check`** | — | Fetches `.SRCINFO` from AUR cgit (resolving a split package to its pkgbase through the RPC) and rejects any `git`/`hg`/`svn`/`bzr`/`fossil` source — in `source =` or any `source_<arch> =` — that is not pinned to an immutable revision. `#tag=` and `#branch=` are rejected on principle. Tarballs pass — `sha256sums` already cover them. Has a TOFU allowlist for tag-pinned upstreams. On rejection it tells you whether the package was deleted from the AUR, or is an installed orphan you should simply remove. |
-| **`aurinstall`** | `yay -S` | Runs the pin-check gate first; refuses to exec `yay` if it fails. Then builds in Manjaro's own `chrootbuild` when that will work — dependency chains included, deps first — falling back to `yay` with a stated reason when it will not, and installs the result (one `[Y/n]` away on a terminal; `--install`/`--no-install` decide for scripts). See [Building in a chroot](#building-in-a-chroot). |
-| **`aurupdate`** | `yay -Sua` | Pin-checks every package with a pending AUR upgrade before any of them build. |
+| **`safeup`** | `pacman -Syu` | Auto-detects foreign repos from `pacman.conf` (anything outside `core`/`extra`/`multilib`/`community` and their `-testing` variants). Judges each pending upgrade by the copy pacman will actually install — the first repo in `pacman.conf` order that carries it — and holds a foreign one whose version-constrained dependency is satisfied neither now (`pacman -T`) nor by the same upgrade (`pacman -Sddp`). The pre-flight runs against a private snapshot of the sync databases, so the real one is never refreshed without being upgraded. On `installing X breaks dependency … required by Y` for an AUR `Y`, upgrades anyway with `--assume-installed` standing in for Y's stale dependency and names `Y` for a rebuild — a repo library is never held back; if `Y` comes from a repo, stops with nothing changed. `--check` reports without root and changes nothing; `--aur` chains `aurupdate`, and the rebuild of any AUR package the upgrade broke, after a clean repo upgrade. Chains into `aur-rebuild-check` on success. Logs every hold and every needed rebuild to `/var/log/safeup.log`. |
+| **`aur-rebuild-check`** | — | `ldd`s every ELF owned by every `pacman -Qmq` package — found by magic bytes, so `/opt/<app>/<exe>` counts — and reports `=> not found`. Also flags a package with files under a `/usr/lib/python3.X/` that is not the installed python's: the pure-Python breakage a soname scan cannot see. A tree whose own interpreter is still installed (`python311` from the AUR) is live, not stale. Filters the two false positives that otherwise flag `-bin` packages forever: privately bundled libraries resolved through an `$ORIGIN` RPATH, and optional sonames named in `AUR_REBUILD_IGNORE_SONAMES`. `--fix` offers `yay -S --rebuild`, after `aur-pin-check --deps` has passed the set. |
+| **`aur-pin-check`** | — | Fetches `.SRCINFO` from AUR cgit (resolving a split package to its pkgbase through the RPC) and rejects any `git`/`hg`/`svn`/`bzr`/`fossil` source — in `source =` or any `source_<arch> =` — that is not pinned to an immutable revision. `#tag=` and `#branch=` are rejected on principle. Tarballs pass — `sha256sums` already cover them. Has a TOFU allowlist for tag-pinned upstreams. Reads the PKGBUILD too, as text, and rejects one whose source arrays name an unpinned VCS source the `.SRCINFO` hides. `--deps` also checks every AUR dependency the build would pull in; `--from-aur` checks a name even when a binary repo carries it. Names are URL-encoded, so `aewm++` works. On rejection it tells you whether the package was deleted from the AUR, or is an installed orphan you should simply remove. |
+| **`aurinstall`** | `yay -S` | Runs the pin-check gate first — on the package and every AUR dependency it pulls in — and refuses to exec `yay` if it fails. Then builds in Manjaro's own `chrootbuild` when that will work — dependency chains included, deps first — pin-checking the clones it is about to build and offering the PKGBUILDs for review first, falling back to `yay` with a stated reason when it will not, and installs the result (one `[Y/n]` away on a terminal; `--install`/`--no-install` decide for scripts). See [Building in a chroot](#building-in-a-chroot). |
+| **`aurupdate`** | `yay -Sua` | Pin-checks every package with a pending AUR upgrade, and every AUR dependency those upgrades pull in, before any of them build. |
 | **`remove-versioned-kernel`** | `pacman -Rns` | Evicts `linuxNN`, `linuxNN-headers` and every `linuxNN-*` extramodule that depends on the kernel (`-nvidia`, `-r8168`, `-zfs`, …) in one transaction, then prunes exactly those names from `IgnorePkg` — nothing else is touched, nothing is added. Refuses to remove the running kernel (by module-directory owner *and* by `uname -r` version) or the last one you have. |
 
 ### Building in a chroot
@@ -336,15 +355,16 @@ first, and falls back to `yay` — always saying which one tripped — rather th
 failing:
 
 - `manjaro-chrootbuild` is not installed.
-- The dependency chain cannot be resolved — a member is missing from the AUR
-  (a dead source: no build order fixes that), there is a cycle, or the chain is
-  deeper than `AURINSTALL_MAX_CHAIN` (10). **Resolvable chains are built**, deps
+- The dependency chain will not build — there is a cycle, or the chain is
+  deeper than `AURINSTALL_MAX_CHAIN` (10). A member missing from the AUR
+  altogether (a dead source: no build order fixes that) is refused earlier,
+  by the pin check, on every path. **Resolvable chains are built**, deps
   first, as one `chrootbuild` run chained with `-n`
   (`-p dep2 -n -p dep1 -n -p target`), and every chained dependency is
-  pin-checked exactly like a named target — an unvetted dep is the same
-  supply-chain hole as an unvetted target. The `-n` form was
-  posted on the Manjaro forum by linux-aarhus, as was the failure case the
-  resolver refuses on.
+  pin-checked exactly like a named target — in the clone that is about to
+  build — because an unvetted dep is the same supply-chain hole as an unvetted
+  target. The `-n` form was posted on the Manjaro forum by linux-aarhus, as was
+  the failure case the resolver refuses on.
 - The package is a `*-bin`. Nothing is compiled, so a chroot cannot change what
   gets installed. It *would* still isolate the PKGBUILD's own execution — a
   real if smaller benefit — so `--chroot` forces it anyway if you want that.
@@ -427,27 +447,24 @@ purpose, and a tool that oversells itself is worse than no tool.
   in the AUR index, because in that case the "just override it" advice is
   actively dangerous — the PKGBUILD you are about to trust may be years stale.
 
-### Known gaps in the pin check
+### What the pin check cannot do
 
-Found in review for 1.5.0 and being fixed. Until then, know where the gate
-does not reach:
+Up to 1.5.0 the gate skipped repo-carried names that the chroot then built from
+the AUR, never checked AUR dependencies on the yay path, trusted `.SRCINFO`
+without looking at the PKGBUILD, and could not fetch a name with a `+` in it.
+1.6.0 closes all four, with a test for each that fails against 1.5.0. What is
+left is what no static check can close:
 
-- **A name a configured repo also carries is not checked.** `aur-pin-check`
-  skips it as "not an AUR concern", but `aurinstall`'s chroot path builds the
-  AUR copy anyway. With chaotic-aur, which carries AUR names, that is a build
-  nobody checked. The same goes for a dependency your repos carry only at too
-  old a version.
-- **On the yay path, only the packages you name are checked.** AUR
-  dependencies that yay pulls in are not. That path is `--no-chroot`,
-  `aurupdate`, chains deeper than 10, and every system without
-  `manjaro-chrootbuild` — which includes Arch and EndeavourOS.
-- **It stops a careless maintainer, not a malicious one.** The check reads
-  `.SRCINFO`, which the maintainer writes and the AUR never compares with the
-  PKGBUILD. The suite's yay config switches off the diff menu that would show
-  you the PKGBUILD itself; turn it back on if that is your threat.
-- **Package names containing `+` are always refused.** The name is not
-  URL-encoded, so the AUR reads `+` as a space and the fetch fails. It fails
-  closed, but `aurinstall aewm++` cannot work.
+- **A hostile maintainer.** The PKGBUILD is now read too, and a `.SRCINFO`
+  that hides an unpinned source from it is refused. But a PKGBUILD is code: one
+  that assembles its URL at run time, or does its damage in `build()`, passes
+  any check that does not run it. That is why yay's diff menu is back on and
+  `aurinstall` offers the PKGBUILDs (`v`) before a chroot build. Read them.
+- **The yay path's window.** The gate reads the AUR, then yay fetches it
+  again. A push in between is built unseen. The chroot path has no such
+  window: it checks the clone it is about to build.
+- **A dependency only another AUR package provides.** It cannot be resolved by
+  name, so it is refused, with a hint: install the provider first, then retry.
 
 ---
 
@@ -479,11 +496,11 @@ packages installed by that package manager.
 
 ## Testing
 
-Two suites, 93 assertions, both run in CI on every push.
+Two suites, 108 assertions, both run in CI on every push.
 
 ```bash
-bash tests/pin-fixture-test.sh          # 47 assertions — no root, no disk, no network
-sudo bash tests/loopback-core-test.sh   # 46 assertions — root; touches no real disk
+bash tests/pin-fixture-test.sh          # 59 assertions — no root, no disk, no network
+sudo bash tests/loopback-core-test.sh   # 49 assertions — root; touches no real disk
 shellcheck -S warning $(git ls-files '*.sh') bin/*
 ```
 
