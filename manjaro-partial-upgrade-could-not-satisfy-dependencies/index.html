@@ -30,7 +30,7 @@
       "headline": "Manjaro “could not satisfy dependencies” with chaotic-aur or BlackArch",
       "description": "Manjaro pacman -Syu fails with “could not satisfy dependencies” when chaotic-aur or BlackArch is ahead of Manjaro. Why it happens and how to hold it safely.",
       "datePublished": "2026-10-14",
-      "dateModified": "2026-10-14",
+      "dateModified": "2026-10-26",
       "image": "https://doug445.github.io/manjaro-safeaur-updater/card.png",
       "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
       "mainEntityOfPage": "https://doug445.github.io/manjaro-safeaur-updater/manjaro-partial-upgrade-could-not-satisfy-dependencies/",
@@ -139,8 +139,8 @@ No database errors have been found!</code></pre></div>
 <h2 id="automated">Automating the hold</h2>
 <div class="tool">
 <p><strong>Automated:</strong> <code>safeup</code>, from <a href="https://github.com/doug445/manjaro-safeaur-updater">manjaro-safeaur-updater</a>, makes this decision before <code>pacman -Syu</code> rather than after it fails. It reads your repositories from <code>pacman.conf</code> and treats any that is not <code>core</code>, <code>extra</code>, <code>multilib</code>, <code>community</code>, <code>core-testing</code>, <code>extra-testing</code> or <code>multilib-testing</code> as foreign; with none, it passes straight through to plain <code>pacman -Syu</code>. Its pre-flight refreshes a private snapshot of the sync databases, the way <code>checkupdates</code> does, so your real database is never refreshed without an upgrade. For each pending upgrade it judges the copy pacman will actually install, the first repository in <code>pacman.conf</code> order that carries it. If that copy is foreign, each version-constrained dependency must be satisfied either by what is installed (<code>pacman -T</code>) or by a package this same upgrade brings in (<code>pacman -Sddp</code>). A package that fails both is held with <code>--ignore</code>, and everything else upgrades in one <code>pacman -Syu</code>.</p>
-<p>If pacman still reports <code>installing X breaks dependency … required by Y</code>, <code>safeup</code> adds <code>X</code> to <code>--ignore</code> and retries, up to three times, so one ABI break does not block the whole upgrade. Here <code>X</code> is whatever pacman was installing, which can be a library, and each retry is still resolved by pacman as a whole. Every hold is printed and appended to <code>/var/log/safeup.log</code>, so it stays a deferred upgrade you can chase. <code>safeup --check</code> lists pending upgrades and the holds a real run would make, without root and without changing anything (it needs <code>fakeroot</code>, from <code>base-devel</code>). After a successful upgrade it runs <code>aur-rebuild-check</code>.</p>
-<p>The README states its limitation plainly: “<code>safeup</code> does not pre-check whether a package it holds is itself required by something else in the same transaction. It relies on pacman refusing, and then isolates the break.” It also cannot make Manjaro track Arch, or install a package that genuinely needs a newer library; holding it is the correct outcome. See <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a>.</p>
+<p>If pacman still reports <code>installing X breaks dependency … required by Y</code>, <code>safeup</code> does not hold <code>X</code>: that is a Manjaro package, often a library, and holding a library while the rest of the repo moves on is exactly the partial upgrade to avoid. When <code>Y</code> is an AUR package, the repo upgrade goes ahead in full, with <code>--assume-installed</code> standing in for the dependency <code>Y</code> declared, and <code>Y</code> is named for a rebuild against the new library (<code>safeup --aur</code> rebuilds it straight away, behind the pin check). The AUR package is the one out of date, so it is the one left broken until it is rebuilt. When <code>Y</code> comes from a repository, the mirrors disagree mid-sync: <code>safeup</code> changes nothing and says to wait. Up to 1.5.0 this path held <code>X</code>. Every hold, and every needed rebuild, is printed and appended to <code>/var/log/safeup.log</code>, so nothing is left to chase blind. <code>safeup --check</code> lists pending upgrades and the holds a real run would make, without root and without changing anything (it needs <code>fakeroot</code>, from <code>base-devel</code>). After a successful upgrade it runs <code>aur-rebuild-check</code>.</p>
+<p>The README states its limitation plainly: “<code>safeup</code> does not pre-check whether a package it holds is itself required by something else in the same transaction. It relies on pacman refusing, and then acts on pacman’s own message.” It also cannot make Manjaro track Arch, or install a package that genuinely needs a newer library; holding it is the correct outcome. See <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a>.</p>
 </div>
 
 <h2 id="faq">Questions</h2>
@@ -170,7 +170,7 @@ No database errors have been found!</code></pre></div>
       <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
       <a href="https://github.com/doug445/manjaro-safeaur-updater/issues">Issues</a></p>
     <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
-    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 26 October 2026.</p>
   </div>
 </footer>
 

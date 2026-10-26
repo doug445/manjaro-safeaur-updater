@@ -30,7 +30,7 @@
       "headline": "AUR package stopped working after a Manjaro update: “cannot open shared object file”",
       "description": "AUR app failing with “cannot open shared object file” after a Manjaro update? Manjaro shipped a new soname or Python. Find the stale packages and rebuild them.",
       "datePublished": "2026-10-14",
-      "dateModified": "2026-10-14",
+      "dateModified": "2026-10-26",
       "image": "https://doug445.github.io/manjaro-safeaur-updater/card.png",
       "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
       "mainEntityOfPage": "https://doug445.github.io/manjaro-safeaur-updater/aur-package-broken-after-manjaro-update/",
@@ -140,9 +140,9 @@ sudo chrootbuild -p package_name -b stable</code></pre></div>
 
 <h2 id="automated">Automating the check</h2>
 <div class="tool">
-<p><strong>Automated:</strong> <code>aur-rebuild-check</code>, part of <a href="https://github.com/doug445/manjaro-safeaur-updater">manjaro-safeaur-updater</a>, does the find step above. For every package in <code>pacman -Qmq</code> it runs <code>ldd</code> over each file the package owns, recognising ELF objects by their magic bytes rather than their names, so binaries under <code>/opt/&lt;app&gt;/</code> are checked too. It also flags any package with files under a <code>/usr/lib/python3.X/</code> that is not the installed Python’s. It drops the two false positives: a missing soname the package ships itself (resolved at runtime through an <code>$ORIGIN</code> RPATH), and sonames listed, space-separated, in <code>AUR_REBUILD_IGNORE_SONAMES</code> (<code>libjvm.so</code> is ignored by default). It exits 1 when something needs rebuilding, <code>--quiet</code> keeps it silent when nothing does, and <code>safeup</code> runs it after every successful upgrade.</p>
-<p>With <code>--fix</code> it offers <code>yay -S --rebuild</code> for the flagged set, but only after <code>aur-pin-check</code> has passed every package in it: a rebuild fetches the current PKGBUILD, and one whose VCS source is not pinned to an immutable revision is refused rather than rebuilt. The prompt defaults to no; <code>--noconfirm</code> skips it and is passed on to <code>yay</code>.</p>
-<p>For prevention, <code>aurinstall</code> builds new AUR packages in Manjaro’s <code>chrootbuild</code> by default, always with an explicit <code>-b</code> branch taken from <code>pacman-mirrors --get-branch</code>, and says why whenever it falls back to <code>yay</code> (no <code>manjaro-chrootbuild</code>, a dependency chain it cannot resolve, or a <code>-bin</code> package). None of this can fix a package that genuinely needs a newer library than your branch has; the README’s <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a> lists the limits.</p>
+<p><strong>Automated:</strong> <code>aur-rebuild-check</code>, part of <a href="https://github.com/doug445/manjaro-safeaur-updater">manjaro-safeaur-updater</a>, does the find step above. For every package in <code>pacman -Qmq</code> it runs <code>ldd</code> over each file the package owns, recognising ELF objects by their magic bytes rather than their names, so binaries under <code>/opt/&lt;app&gt;/</code> are checked too. It also flags any package with files under a <code>/usr/lib/python3.X/</code> that is not the installed Python’s, unless that version’s own interpreter is still installed: <code>python311</code> from the AUR, and the modules built for it, are live, not stale. It drops the two false positives: a missing soname the package ships itself (resolved at runtime through an <code>$ORIGIN</code> RPATH), and sonames listed, space-separated, in <code>AUR_REBUILD_IGNORE_SONAMES</code> (<code>libjvm.so</code> is ignored by default). It exits 1 when something needs rebuilding, <code>--quiet</code> keeps it silent when nothing does, and <code>safeup</code> runs it after every successful upgrade.</p>
+<p>With <code>--fix</code> it offers <code>yay -S --rebuild</code> for the flagged set, but only after <code>aur-pin-check</code> has passed every package in it and every AUR dependency the rebuild pulls in: a rebuild fetches the current PKGBUILD, and one whose VCS source is not pinned to an immutable revision, or whose <code>.SRCINFO</code> hides one, is refused rather than rebuilt. The prompt defaults to no; <code>--noconfirm</code> skips it and is passed on to <code>yay</code>.</p>
+<p>For prevention, <code>aurinstall</code> builds new AUR packages in Manjaro’s <code>chrootbuild</code> by default, always with an explicit <code>-b</code> branch taken from <code>pacman-mirrors --get-branch</code>, pin-checks the clones it is about to build, and says why whenever it falls back to <code>yay</code> (no <code>manjaro-chrootbuild</code>, a dependency chain it will not build, or a <code>-bin</code> package). None of this can fix a package that genuinely needs a newer library than your branch has; the README’s <a href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What this does not do</a> lists the limits.</p>
 </div>
 
 <h2 id="faq">Questions</h2>
@@ -175,7 +175,7 @@ sudo chrootbuild -p package_name -b stable</code></pre></div>
       <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
       <a href="https://github.com/doug445/manjaro-safeaur-updater/issues">Issues</a></p>
     <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
-    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 26 October 2026.</p>
   </div>
 </footer>
 

@@ -13,7 +13,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Manjaro SafeAUR Updater">
 <meta property="og:title" content="Manjaro SafeAUR Updater: use the AUR on Manjaro without breaking your system">
-<meta property="og:description" content="pacman and yay wrappers that close the three failures behind most Manjaro AUR breakage: partial upgrades, stale sonames, and unpinned VCS sources. 93 tests against real pacman.">
+<meta property="og:description" content="pacman and yay wrappers that close the three failures behind most Manjaro AUR breakage: partial upgrades, stale sonames, and unpinned VCS sources. 108 tests, 49 against real pacman.">
 <meta property="og:url" content="https://doug445.github.io/manjaro-safeaur-updater/">
 <meta property="og:image" content="https://doug445.github.io/manjaro-safeaur-updater/card.png">
 <meta property="og:image:width" content="1200">
@@ -29,7 +29,7 @@
       "description": "pacman and yay wrappers for Manjaro: a partial-upgrade guard for foreign repositories, a post-upgrade scan for AUR packages broken by a library or python bump, a pinning policy for PKGBUILD VCS sources, and chroot builds via manjaro-chrootbuild.",
       "applicationCategory": "UtilitiesApplication",
       "operatingSystem": "Manjaro Linux",
-      "softwareVersion": "1.4.0",
+      "softwareVersion": "1.6.0",
       "license": "https://opensource.org/licenses/MIT",
       "url": "https://doug445.github.io/manjaro-safeaur-updater/",
       "downloadUrl": "https://github.com/doug445/manjaro-safeaur-updater",
@@ -42,8 +42,8 @@
       "mainEntity": [
         { "@type": "Question", "name": "Why does the AUR break things on Manjaro?", "acceptedAnswer": { "@type": "Answer", "text": "The AUR assumes you are current with Arch, and Manjaro's Stable branch deliberately trails Arch. Packages built against Arch's newer libraries can need dependencies Manjaro does not have yet, and when Manjaro catches up, AUR packages you built against the older library stop resolving it." } },
         { "@type": "Question", "name": "Doesn't automating pacman --ignore cause partial upgrades?", "acceptedAnswer": { "@type": "Answer", "text": "No. --ignore suppresses an upgrade, not dependency resolution: pacman still resolves the whole transaction and refuses one that would leave a dependency unsatisfied. The project's test suite proves this against real pacman transactions on every push." } },
-        { "@type": "Question", "name": "Does it work on Arch Linux?", "acceptedAnswer": { "@type": "Answer", "text": "It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable branch trailing Arch; on Arch itself there is no lag to guard against." } },
-        { "@type": "Question", "name": "Does it make the AUR safe?", "acceptedAnswer": { "@type": "Answer", "text": "No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a chroot is build isolation, not a security boundary. Read the PKGBUILD. The AUR is not supported by Arch or Manjaro." } }
+        { "@type": "Question", "name": "Does it work on Arch Linux?", "acceptedAnswer": { "@type": "Answer", "text": "It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable branch trailing Arch; on Arch itself there is no lag to guard against, and none on EndeavourOS, which uses Arch's repositories directly. If you have not installed yet, install EndeavourOS and skip the problem." } },
+        { "@type": "Question", "name": "Does it make the AUR safe?", "acceptedAnswer": { "@type": "Answer", "text": "No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a chroot is build isolation, not a security boundary. The pin check also reads the PKGBUILD and refuses one whose .SRCINFO hides a source, but a PKGBUILD is code: read it. yay's diff menu stays on for that. The AUR is not supported by Arch or Manjaro." } }
       ]
     }
   ]
@@ -70,7 +70,7 @@
       three failures behind almost every Manjaro AUR disaster: the <strong>partial upgrade</strong>
       caused by Manjaro's lag behind Arch, the <strong>stale-soname breakage</strong> after Manjaro
       catches up, and the <strong>unpinned VCS source</strong> that builds something other than
-      what you reviewed. No daemon. 93 tests, 46 of them real <code>pacman</code> transactions.
+      what you reviewed. No daemon. 108 tests, 49 of them real <code>pacman</code> transactions.
     </p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/doug445/manjaro-safeaur-updater">Get it on GitHub</a>
@@ -78,13 +78,21 @@
       <a class="btn" href="https://github.com/doug445/manjaro-safeaur-updater#what-this-does-not-do">What it does not do</a>
     </div>
     <ul class="facts" aria-label="At a glance">
-      <li>v1.4.0</li><li>Free and open source</li><li>MIT</li><li>bash only</li><li>93 tests</li><li>manjaro-chrootbuild</li>
+      <li>v1.6.0</li><li>Free and open source</li><li>MIT</li><li>bash only</li><li>108 tests</li><li>manjaro-chrootbuild</li>
       <li>Not affiliated with Manjaro</li>
     </ul>
   </div>
 </header>
 
 <main class="wrap">
+
+<div class="note">
+  <p><strong>Not on Manjaro yet? Install <a href="https://endeavouros.com/">EndeavourOS</a> instead,
+    and you will never need this.</strong> EndeavourOS is Arch, with Arch's own repositories on
+    Arch's schedule, behind a friendly graphical installer. There is no two-week lag, so the AUR
+    builds against exactly the libraries you have. The best fix for Manjaro's AUR problem is not
+    running Manjaro. Already on Manjaro and staying? Read on.</p>
+</div>
 
 <h2 id="problems">Fix a specific problem</h2>
 <div class="cards">
@@ -101,11 +109,28 @@
 <div class="table-scroll"><table>
   <thead><tr><th>Failure</th><th>When it bites</th><th>What closes it</th></tr></thead>
   <tbody>
-    <tr><td><strong>Partial upgrade.</strong> A foreign binary repo (BlackArch, chaotic-aur) rebuilt a package against Arch's newer library; installing it drags in a dependency Manjaro can't satisfy yet.</td><td>While Manjaro is behind</td><td><code>safeup</code> holds only the foreign upgrades whose version-constrained dependencies can't be met yet, and logs every hold.</td></tr>
+    <tr><td><strong>Partial upgrade.</strong> A foreign binary repo (BlackArch, chaotic-aur) rebuilt a package against Arch's newer library; installing it drags in a dependency Manjaro can't satisfy yet.</td><td>While Manjaro is behind</td><td><code>safeup</code> holds only the foreign upgrades whose version-constrained dependencies can't be met yet, and logs every hold. A Manjaro library is never held back.</td></tr>
     <tr><td><strong>Stale soname.</strong> Manjaro ships the new library, and AUR packages built against the old one die at runtime.</td><td>When Manjaro catches up</td><td><code>aur-rebuild-check</code> names every AUR package that needs rebuilding, python bumps included.</td></tr>
-    <tr><td><strong>Unpinned VCS source.</strong> <code>git+https://…</code> with no commit: what builds today isn't what you audited.</td><td>Any install or upgrade</td><td><code>aur-pin-check</code> refuses VCS sources not pinned to an immutable revision.</td></tr>
+    <tr><td><strong>Unpinned VCS source.</strong> <code>git+https://…</code> with no commit: what builds today isn't what you audited.</td><td>Any install or upgrade</td><td><code>aur-pin-check</code> refuses VCS sources not pinned to an immutable revision, in the package and in every AUR dependency it pulls in, and refuses a PKGBUILD whose <code>.SRCINFO</code> hides a source.</td></tr>
   </tbody>
 </table></div>
+
+<h2 id="new">New in 1.6.0</h2>
+<ul>
+  <li><strong>Every AUR dependency is pin-checked</strong>, on every path. Before, the
+    <code>yay</code> path and <code>aurupdate</code> checked only the packages you named.</li>
+  <li><strong>The PKGBUILD is read too.</strong> <code>.SRCINFO</code> is written by the maintainer
+    and never checked by the AUR, so a PKGBUILD whose source arrays name an unpinned VCS source its
+    <code>.SRCINFO</code> hides is refused. And yay's PKGBUILD diff menu is back on.</li>
+  <li><strong>The chroot checks what it builds:</strong> the clones themselves, including names a
+    binary repo such as chaotic-aur also carries. A push between the check and the clone is caught.</li>
+  <li><strong>No more held libraries.</strong> When a Manjaro upgrade breaks an AUR package,
+    <code>safeup</code> lets the repo upgrade land and names the AUR package for a rebuild;
+    <code>safeup --aur</code> rebuilds it.</li>
+  <li>Names with a <code>+</code> work; an installed <code>python311</code> is no longer flagged as stale.</li>
+</ul>
+<p>Every fix has a test that fails against 1.5.0.
+  <a href="https://github.com/doug445/manjaro-safeaur-updater/releases/tag/v1.6.0">Full release notes</a>.</p>
 
 <h2 id="quick-start">Quick start</h2>
 <div class="codeblock"><pre><code>git clone https://github.com/doug445/manjaro-safeaur-updater.git
@@ -127,7 +152,8 @@ aur-rebuild-check      # what needs rebuilding after a library or python bump</c
   leave a dependency unsatisfied, changing nothing. The project tests that against real pacman
   on every push rather than asserting it, because the whole safety argument rests on it. The
   <a href="manjaro-partial-upgrade-could-not-satisfy-dependencies/">partial-upgrade guide</a>
-  shows the transcript.
+  shows the transcript. And it only ever holds a foreign package: when a Manjaro library's
+  upgrade breaks an AUR package, the library goes ahead and the AUR package is rebuilt.
 </p>
 
 <h2 id="chroot">Builds against the libraries you actually run</h2>
@@ -137,14 +163,16 @@ aur-rebuild-check      # what needs rebuilding after a library or python bump</c
   by default. linux-aarhus of the Manjaro team suggested it. The chroot is synced to your Manjaro
   branch, so the package links against the libraries you run rather than whatever the AUR assumed.
   That fixes stale-soname breakage at build time. AUR dependency chains are built dependencies
-  first, and every link in the chain is pin-checked.
+  first, every link is pin-checked in the clone that is about to build, and on a terminal you
+  can read the PKGBUILDs before anything runs.
 </p>
 
 <h2 id="not">What it does not do</h2>
 <ul>
-  <li>It doesn't make Manjaro track Arch. If you want Arch's timing, run Arch.</li>
+  <li>It doesn't make Manjaro track Arch. If you want Arch's timing, run Arch, or
+    <a href="https://endeavouros.com/">EndeavourOS</a>.</li>
   <li>It doesn't audit what a PKGBUILD <em>does</em>. Pinning proves you build the commit you
-    reviewed, not that the commit is benign.</li>
+    reviewed, not that the commit is benign. A PKGBUILD is code; read it.</li>
   <li>A chroot is build isolation, not a security boundary.</li>
   <li>It doesn't replace backups or snapshots.</li>
 </ul>
@@ -165,14 +193,11 @@ aur-rebuild-check      # what needs rebuilding after a library or python bump</c
 </details>
 <details>
   <summary>Does it work on Arch Linux?</summary>
-  <p>It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable
-    branch trailing Arch; on Arch itself there is no lag to guard against.</p>
+  <p>It is scoped to Manjaro on purpose. The problem it solves is created by Manjaro's Stable branch trailing Arch; on Arch itself there is no lag to guard against, and none on EndeavourOS, which uses Arch's repositories directly. If you have not installed yet, install <a href="https://endeavouros.com/">EndeavourOS</a> and skip the problem.</p>
 </details>
 <details>
   <summary>Does it make the AUR safe?</summary>
-  <p>No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a
-    chroot is build isolation, not a security boundary. Read the PKGBUILD. The AUR is not
-    supported by Arch or Manjaro.</p>
+  <p>No. Pinning proves you build the commit you reviewed, not that the commit is benign, and a chroot is build isolation, not a security boundary. The pin check also reads the PKGBUILD and refuses one whose <code>.SRCINFO</code> hides a source, but a PKGBUILD is code: read it. yay's diff menu stays on for that. The AUR is not supported by Arch or Manjaro.</p>
 </details>
 
 <p><small>Not for beginners: everything here assumes you can read a PKGBUILD and recover your own
@@ -186,7 +211,7 @@ aur-rebuild-check      # what needs rebuilding after a library or python bump</c
       <a href="https://github.com/doug445/manjaro-safeaur-updater">Source on GitHub</a> ·
       <a href="https://github.com/doug445/manjaro-safeaur-updater/releases">Releases</a></p>
     <p>Independent project. Not affiliated with or endorsed by Manjaro or Arch Linux. The AUR is not supported by either.</p>
-    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 22 October 2026.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 26 October 2026.</p>
   </div>
 </footer>
 
