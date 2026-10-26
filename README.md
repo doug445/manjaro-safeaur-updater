@@ -153,9 +153,9 @@ the answer is at the top of this page.
 **To linux-aarhus:** two of this suite's best ideas are yours — the chroot
 build and the `-n` chain — and they are credited as yours. Our private
 exchange went badly, and I would rather fix that than keep score. If you are
-willing, message me yourself — on the Manjaro forum, where we last spoke, or
-at the address in [LICENSE](LICENSE). You, directly; not through anyone else.
-And if anything on this page is wrong, tell me and I will correct it.
+willing, send me a direct message — privately, not in a forum thread, and
+from you, not through anyone else. And if anything on this page is wrong, tell
+me and I will correct it.
 
 ### About those two weeks
 
