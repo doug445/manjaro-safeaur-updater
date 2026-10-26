@@ -179,9 +179,11 @@ AUR itself.
 
 ### How honest is "solves it completely"?
 
-Completely, for the three failures above — that is what the test suite
-demonstrates, package by package. Not completely, for Manjaro in general.
-Read [What this does not do](#what-this-does-not-do) before you rely on it.
+Completely, for the first two failures above — that is what the test suite
+demonstrates, package by package. Not yet completely for the third: the pin
+check has [known gaps](#known-gaps-in-the-pin-check), being fixed. And not
+completely for Manjaro in general. Read
+[What this does not do](#what-this-does-not-do) before you rely on it.
 
 ---
 
@@ -424,6 +426,28 @@ purpose, and a tool that oversells itself is worse than no tool.
   indefinitely.** `aur-pin-check` warns you when a rejected package is no longer
   in the AUR index, because in that case the "just override it" advice is
   actively dangerous — the PKGBUILD you are about to trust may be years stale.
+
+### Known gaps in the pin check
+
+Found in review for 1.5.0 and being fixed. Until then, know where the gate
+does not reach:
+
+- **A name a configured repo also carries is not checked.** `aur-pin-check`
+  skips it as "not an AUR concern", but `aurinstall`'s chroot path builds the
+  AUR copy anyway. With chaotic-aur, which carries AUR names, that is a build
+  nobody checked. The same goes for a dependency your repos carry only at too
+  old a version.
+- **On the yay path, only the packages you name are checked.** AUR
+  dependencies that yay pulls in are not. That path is `--no-chroot`,
+  `aurupdate`, chains deeper than 10, and every system without
+  `manjaro-chrootbuild` — which includes Arch and EndeavourOS.
+- **It stops a careless maintainer, not a malicious one.** The check reads
+  `.SRCINFO`, which the maintainer writes and the AUR never compares with the
+  PKGBUILD. The suite's yay config switches off the diff menu that would show
+  you the PKGBUILD itself; turn it back on if that is your threat.
+- **Package names containing `+` are always refused.** The name is not
+  URL-encoded, so the AUR reads `+` as a space and the fetch fails. It fails
+  closed, but `aurinstall aewm++` cannot work.
 
 ---
 
