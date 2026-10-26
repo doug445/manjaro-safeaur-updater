@@ -16,6 +16,9 @@
 #      interpreter's site-packages has no ELF to fail — it is simply never
 #      imported again — and pacman sees nothing wrong with it. This is the
 #      single most common post-upgrade AUR breakage on Manjaro.
+#      A tree whose interpreter is still installed is live, not stale:
+#      python311 from the AUR owns /usr/lib/python3.11/ by design, and so do
+#      the modules built for it. A tree counts as live while its os.py exists.
 #
 # A bare "=> not found" is NOT always a real break. Two false positives
 # are filtered out (otherwise -bin packages like cloudflare-warp-bin get
@@ -121,8 +124,12 @@ for pkg in "${aur_pkgs[@]}"; do
         # is not anchored on the left.
         if [[ -n "$py_cur" && "$f" =~ /usr/lib/(python3\.[0-9]+)/ \
               && "${BASH_REMATCH[1]}" != "$py_cur" ]]; then
-            reason="files under /usr/lib/${BASH_REMATCH[1]}/ — the installed interpreter is $py_cur"
-            break
+            pydir=${BASH_REMATCH[1]}
+            # Same prefix as $f, so a RootDir-prefixed listing still finds it.
+            if [[ ! -e "${f%%/usr/lib/python3.*}/usr/lib/$pydir/os.py" ]]; then
+                reason="files under /usr/lib/$pydir/ — the installed interpreter is $py_cur"
+                break
+            fi
         fi
         # Check 1: an ELF whose DT_NEEDED does not resolve. Regular files only:
         # a symlink's target is scanned under its own name if this package owns
@@ -167,7 +174,7 @@ if [[ "$mode" == fix ]]; then
         echo "[aur-rebuild] --fix needs aur-pin-check on PATH; refusing to rebuild ungated" >&2
         exit 2
     fi
-    if ! aur-pin-check "${need_rebuild[@]}"; then
+    if ! aur-pin-check --deps "${need_rebuild[@]}"; then
         echo "" >&2
         echo "[aur-rebuild] refusing to rebuild: the pin-check rejected one or more of these." >&2
         echo "[aur-rebuild] override, once you have vetted the PKGBUILD: yay -S --rebuild ${need_rebuild[*]}" >&2

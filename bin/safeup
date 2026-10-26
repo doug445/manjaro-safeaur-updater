@@ -35,9 +35,18 @@
 # recovery paths if pacman fails:
 #   - "unresolvable package conflicts" → re-run interactively so [y/N]
 #     prompts that --noconfirm would auto-reject can be answered by hand.
-#   - "installing X breaks dependency required by Y" → auto-add X to
-#     --ignore and retry, so a single ABI break doesn't block the entire
-#     upgrade. Held packages get logged. Capped at 3 retries.
+#   - "installing X breaks dependency D required by Y", where Y is an AUR
+#     (foreign) package → the repo upgrade goes ahead in full, with
+#     `--assume-installed` standing in for D, and Y is named for a rebuild.
+#     X is a repository package and is never held back: holding a library
+#     while the rest of the repo moves on is the partial upgrade this suite
+#     exists to prevent, and only a dependent that declares a versioned dep
+#     on it would be protected by pacman. Y, the AUR package, is the one that
+#     is out of date, so Y is the one left broken until it is rebuilt —
+#     `safeup --aur` rebuilds it straight away, through aurinstall's gate.
+#     If Y comes from a repository, the repositories are mid-sync and
+#     disagree with each other: nothing is changed, and safeup says to wait.
+#     Logged. Capped at 3 retries.
 #
 # Usage:
 #   safeup                # full flow (one master y/n, then unattended)
@@ -89,22 +98,43 @@ confirm_proceed() {
     case "$ans" in n|N|no|No) msg "aborted by user"; exit 1 ;; esac
 }
 
+# The --assume-installed argument that stands in for a dependency string, or
+# nothing if none can. `name=ver` is already the form pacman takes. A ranged
+# or bare dependency is currently met by the installed package of that name,
+# so its installed version is the stand-in that satisfies it.
+assume_for() {
+    local dep="$1" name ver
+    if [[ "$dep" == *=* && "$dep" != *[\<\>]=* ]]; then
+        printf '%s' "$dep"; return 0
+    fi
+    name="${dep%%[<>=]*}"
+    ver=$(pacman -Q -- "$name" 2>/dev/null | awk '{print $2}') || return 1
+    [[ -n "$ver" ]] || return 1
+    printf '%s=%s' "$name" "$ver"
+}
+
+# AUR packages the repo upgrade left with a dependency only --assume-installed
+# met: they need a rebuild against the new libraries. Filled by run_pacman_syu.
+rebuild_aur=()
+rebuild_why=()
+
 # Run pacman -Syu and recover from two common failure modes:
 #   1. "unresolvable package conflicts" — --noconfirm auto-rejects the
 #      "Remove X to resolve conflict?" prompt. Re-run interactively.
-#   2. "installing X breaks dependency '...' required by Y" — an ABI break,
-#      typically a repo upgrade outpacing an AUR consumer. Add X to
-#      --ignore and retry. Repeat (up to MAX_RETRIES) since one skip can
-#      unblock further dep resolution and reveal the next break.
-# All other failures bubble up unchanged. Skipped packages get logged.
+#   2. "installing X breaks dependency 'D' required by Y" — a repo upgrade
+#      outpacing an AUR consumer. For an AUR Y, retry with
+#      --assume-installed standing in for D, and record Y for a rebuild.
+#      Repeat (up to max_retries) since one break can hide the next. A repo
+#      Y, or a D nothing can stand in for, stops the run with nothing changed.
+# All other failures bubble up unchanged.
 run_pacman_syu() {
     local logfile rc attempt=0
     local -i max_retries=3
-    local skipped=()
+    local assumes=()
     local user_args=("$@")
     # Only recovery path 1 needs a human: it exists precisely because
-    # --noconfirm auto-rejected a [y/N] prompt. Path 2 (auto-hold an ABI
-    # break) needs nobody, and dropping --noconfirm for it would strand any
+    # --noconfirm auto-rejected a [y/N] prompt. Path 2 (an AUR dependency
+    # stood in for) needs nobody, and dropping --noconfirm for it would strand any
     # non-interactive caller — a cron run, a CI run, a script — on pacman's
     # "Proceed with installation?" with no tty to answer it.
     local retry_interactive=0
@@ -117,12 +147,9 @@ run_pacman_syu() {
         attempt=$((attempt + 1))
         : > "$logfile"
 
-        # Build runtime arg list: caller args + accumulated --ignore.
-        local args_now=("${user_args[@]}")
-        if (( ${#skipped[@]} > 0 )); then
-            local joined; joined=$(IFS=,; echo "${skipped[*]}")
-            args_now+=(--ignore "$joined")
-        fi
+        # Build runtime arg list: caller args + accumulated --assume-installed.
+        local args_now=("${user_args[@]}") as
+        for as in "${assumes[@]}"; do args_now+=(--assume-installed "$as"); done
 
         # First attempt uses --noconfirm (master prompt already covered it),
         # and so does any retry that does not need a human. Only a retry
@@ -139,12 +166,20 @@ run_pacman_syu() {
         fi
         rc=${PIPESTATUS[0]}
         (( rc == 0 )) && {
-            (( ${#skipped[@]} > 0 )) && {
+            (( ${#rebuild_aur[@]} > 0 )) && {
+                local i
                 msg ""
-                msg "upgrade succeeded with these package(s) held: ${skipped[*]}"
+                msg "repo upgrade complete. These AUR package(s) were built against the old"
+                msg "libraries and need a rebuild — until then they may not start:"
+                for i in "${!rebuild_aur[@]}"; do
+                    msg "  - ${rebuild_aur[$i]} (needed ${rebuild_why[$i]})"
+                done
+                msg "rebuild: aurinstall ${rebuild_aur[*]}   (or: safeup --aur, next time)"
                 {
-                    echo "=== $(date -Is) auto-skipped: ${#skipped[@]} ==="
-                    printf '  %s\n' "${skipped[@]}"
+                    echo "=== $(date -Is) needs AUR rebuild: ${#rebuild_aur[@]} ==="
+                    for i in "${!rebuild_aur[@]}"; do
+                        printf '  %s (needed %s)\n' "${rebuild_aur[$i]}" "${rebuild_why[$i]}"
+                    done
                 } | sudo tee -a "$LOG" >/dev/null
             }
             return 0
@@ -160,25 +195,41 @@ run_pacman_syu() {
             continue
         fi
 
-        # Recovery path 2: ABI/dep break — auto-skip the breaking pkg(s) and retry.
-        # Pattern: ":: installing protobuf (34.1-1) breaks dependency '...' required by clementine"
-        local new_skips
-        new_skips=$(grep -oE "installing [a-zA-Z0-9._+-]+ \(" "$logfile" \
-                    | awk '{print $2}' | sort -u)
-        if [[ -n "$new_skips" ]]; then
-            local added=0
+        # Recovery path 2: a repo upgrade breaks an AUR package's dependency.
+        # Pattern: ":: installing protobuf (34.1-1) breaks dependency 'protobuf=33' required by clementine"
+        local breaks
+        breaks=$(grep -oE "breaks dependency '[^']+' required by [^[:space:]]+" "$logfile" \
+                 | sed -E "s/^breaks dependency '([^']+)' required by /\1 /" | sort -u)
+        if [[ -n "$breaks" ]]; then
+            local added=0 dep needer stand foreign
+            foreign=$(pacman -Qmq 2>/dev/null)
             msg ""
-            msg "ABI/dep break detected — auto-holding to let the rest of the upgrade proceed:"
-            while IFS= read -r p; do
-                [[ -z "$p" ]] && continue
-                # Avoid duplicates if pacman re-reports the same break.
-                local already=0
-                for s in "${skipped[@]}"; do [[ "$s" == "$p" ]] && { already=1; break; }; done
+            msg "the repo upgrade breaks a dependency of an installed package:"
+            while read -r dep needer; do
+                [[ -n "$dep" ]] || continue
+                if ! grep -qxF -- "$needer" <<<"$foreign"; then
+                    msg "  - $needer needs '$dep', and $needer comes from your repositories."
+                    msg ""
+                    msg "the repositories disagree with each other — a mirror is mid-sync. Nothing was"
+                    msg "changed. Wait for it to finish (or switch mirror: sudo pacman-mirrors --fasttrack),"
+                    msg "then run safeup again."
+                    return "$rc"
+                fi
+                if ! stand=$(assume_for "$dep"); then
+                    msg "  - $needer (AUR) needs '$dep', and nothing can stand in for it."
+                    msg ""
+                    msg "nothing was changed. Rebuild or remove $needer first, then run safeup again:"
+                    msg "  aurinstall $needer      or      sudo pacman -R $needer"
+                    return "$rc"
+                fi
+                local s already=0
+                for s in "${assumes[@]}"; do [[ "$s" == "$stand" ]] && { already=1; break; }; done
                 (( already )) && continue
-                msg "  - $p (rebuild dependent AUR pkg, or wait for upstream)"
-                skipped+=("$p")
+                msg "  - $needer (AUR) needs '$dep' — upgrading anyway; $needer gets rebuilt after"
+                assumes+=("$stand")
+                rebuild_aur+=("$needer"); rebuild_why+=("$dep")
                 added=$((added + 1))
-            done <<<"$new_skips"
+            done <<<"$breaks"
             if (( added > 0 )); then
                 msg ""
                 retry_interactive=0
@@ -325,6 +376,18 @@ if (( pac_rc == 0 && run_aur )); then
         (( noconfirm )) && aur_args+=(--noconfirm)
         aurupdate "${aur_args[@]}"
         aur_rc=$?
+        # The AUR packages the repo upgrade broke: rebuild them now, against
+        # the libraries just installed, through aurinstall's gate.
+        if (( ${#rebuild_aur[@]} > 0 )); then
+            if command -v aurinstall >/dev/null 2>&1; then
+                echo
+                msg "rebuilding the AUR package(s) the repo upgrade broke: ${rebuild_aur[*]}"
+                aurinstall --install "${rebuild_aur[@]}" || aur_rc=1
+            else
+                msg "--aur: aurinstall is not on PATH — rebuild ${rebuild_aur[*]} yourself"
+                aur_rc=1
+            fi
+        fi
     else
         msg "--aur: aurupdate is not on PATH — AUR upgrades skipped"
         aur_rc=1

@@ -74,7 +74,7 @@ if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && command -v notify-send >/dev/null
     msg="SafeAUR drift: ${#mismatches[@]} file(s) differ"
     (( missing )) && msg+=" + missing files"
     notify-send -u critical "Manjaro SafeAUR Updater audit" "$msg
-Review ~/Projects/manjaro-safeaur-updater/ vs deployed."
+Review $HERE/ vs deployed."
 fi
 
 (( missing )) && exit 2

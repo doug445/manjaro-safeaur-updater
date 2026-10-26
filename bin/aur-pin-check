@@ -24,6 +24,14 @@
 # cgit serves .SRCINFO per pkgBASE; a split package's own name has no branch
 # there, so it is resolved to its pkgbase through the AUR RPC first.
 #
+# .SRCINFO is written by the maintainer, and the AUR never checks it against
+# the PKGBUILD. So the PKGBUILD is read too — as text, never executed — and a
+# package is REJECTED when its source arrays name more unpinned VCS sources
+# than its .SRCINFO admits to. That catches a .SRCINFO that hides a source. It
+# is a tripwire, not a proof: a PKGBUILD is code, and one that builds its URL
+# at run time, or does its damage in build(), passes any static check. The
+# defence against a hostile maintainer is reading the PKGBUILD.
+#
 # Allowlist (escape hatch for tag-pinned upstreams):
 #   /etc/aur-pin-check/allowlist.conf — one rule per line:
 #     <pkg>  <vcs-source-spec>  <expected-40-hex-sha>
@@ -35,6 +43,17 @@
 #
 # Usage:
 #   aur-pin-check pkg1 pkg2 ...
+#   aur-pin-check --deps pkg ...     # also every AUR package their build pulls
+#                                    # in: depends, makedepends, checkdepends
+#   aur-pin-check --from-aur pkg ... # check even a name a binary repo carries:
+#                                    # for callers about to build it from the AUR
+#
+# By default a name a binary repository carries is skipped: `yay -S` installs
+# the repo copy, so the AUR's is not what lands. A caller that builds from the
+# AUR whatever the repos hold (aurinstall's chroot) passes --from-aur. With
+# --deps, a dependency is walked only when nothing installed and nothing in a
+# binary repo satisfies it — exactly the ones yay would build — and always
+# with --from-aur semantics: a repo copy that is too old is why it is built.
 #
 # On REJECT, prints triage hints before you reach for the override: whether
 # the package is still in the AUR index at all (cgit serves deleted packages'
@@ -55,8 +74,36 @@ ALLOWLIST="${AUR_PIN_ALLOWLIST:-/etc/aur-pin-check/allowlist.conf}"
 # every test run. Nothing but tests should ever set these.
 AUR_SRCINFO_URL="${AUR_SRCINFO_URL:-https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=%s}"
 AUR_RPC_URL="${AUR_RPC_URL:-https://aur.archlinux.org/rpc/v5/info?arg%%5B%%5D=%s}"
+AUR_PKGBUILD_URL="${AUR_PKGBUILD_URL:-https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=%s}"
 
-(( $# > 0 )) || { echo "usage: $0 <pkg>..." >&2; exit 2; }
+walk_deps=0
+from_aur=0
+while (( $# > 0 )); do
+    case "$1" in
+        --deps)     walk_deps=1; shift ;;
+        --from-aur) from_aur=1; shift ;;
+        --)         shift; break ;;
+        -*)         echo "aur-pin-check: unknown option: $1" >&2; exit 2 ;;
+        *)          break ;;
+    esac
+done
+
+(( $# > 0 )) || { echo "usage: $0 [--deps] [--from-aur] <pkg>..." >&2; exit 2; }
+
+# Percent-encode a package name for a URL. Names may carry '+' and '@'; sent
+# raw, cgit and the RPC read '+' as a space, and `aewm++` was a 404 forever.
+# A file:// URL is decoded by curl the same way, so the fixtures still match.
+urlenc() {
+    local s="$1" out="" c i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        case "$c" in
+            [A-Za-z0-9._~-]) out+="$c" ;;
+            *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
 
 # Look up an allowlist rule. Echoes the expected SHA on stdout if a row
 # matches (pkg + exact source spec). No output if no match.
@@ -87,7 +134,7 @@ resolve_git_tag() {
 # Fetch the AUR RPC info record for a name. Echoes the body; fails on any
 # transport error so callers can tell "not indexed" from "could not ask".
 rpc_info() {
-    local rpc; printf -v rpc "$AUR_RPC_URL" "$1"
+    local rpc; printf -v rpc "$AUR_RPC_URL" "$(urlenc "$1")"
     curl -fsSL --max-time 10 "$rpc" 2>/dev/null
 }
 
@@ -103,14 +150,48 @@ aur_pkgbase() {
 # is retried once with it. The RPC round-trip is on the failure path only.
 fetch_srcinfo() {
     local pkg="$1" url body base
-    printf -v url "$AUR_SRCINFO_URL" "$pkg"
+    printf -v url "$AUR_SRCINFO_URL" "$(urlenc "$pkg")"
     if body=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) && [[ -n "$body" ]]; then
         printf '%s\n' "$body"; return 0
     fi
     base=$(aur_pkgbase "$pkg") || return 1
     [[ -n "$base" && "$base" != "$pkg" ]] || return 1
-    printf -v url "$AUR_SRCINFO_URL" "$base"
+    printf -v url "$AUR_SRCINFO_URL" "$(urlenc "$base")"
     curl -fsSL --max-time 15 "$url" 2>/dev/null
+}
+
+# The PKGBUILD of a pkgbase, as text. Never sourced, never executed.
+fetch_pkgbuild() {
+    local url body
+    printf -v url "$AUR_PKGBUILD_URL" "$(urlenc "$1")"
+    body=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) && [[ -n "$body" ]] || return 1
+    printf '%s\n' "$body"
+}
+
+# Every VCS URL written in a PKGBUILD's source arrays (source=, source_<arch>=,
+# and += forms), one per line. A text scan: quotes are tracked so a `)` or `#`
+# inside a string does not end the array, and a `#` after whitespace outside
+# quotes starts a comment. Variables stay unexpanded — `git+$url#commit=$_c`
+# is still recognisably a VCS source carrying a commit pin.
+pkgbuild_vcs_urls() {
+    awk '
+        function scan(s,   i, c) {
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (q != "") { if (c == q) q = ""; buf = buf c; continue }
+                if (c == "\"" || c == "\047") { q = c; buf = buf c; continue }
+                if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
+                if (c == ")") { print buf; buf = ""; inarr = 0; return }
+                buf = buf c
+            }
+            buf = buf " "
+        }
+        !inarr && /^[[:space:]]*#/ { next }
+        !inarr && match($0, /^[[:space:]]*source(_[A-Za-z0-9_]+)?\+?=\(/) {
+            inarr = 1; q = ""; buf = ""; scan(substr($0, RSTART + RLENGTH)); next
+        }
+        inarr { scan($0) }
+    ' | grep -oE '(git|hg|svn|bzr|fossil)(\+|://)[^"'\''[:space:])]*'
 }
 
 # Is this package still present in the AUR RPC index?
@@ -173,23 +254,68 @@ is_pinned() {
     [[ "$url" =~ $re ]]
 }
 
+# Is this dependency string met without building anything from the AUR — by
+# what is installed, or by a binary repository? Those are the deps yay leaves
+# alone; anything else it builds, so --deps checks it.
+dep_met() {
+    pacman -T -- "$1" >/dev/null 2>&1 && return 0
+    LC_ALL=C pacman -Sddp --noconfirm --print-format '%n' -- "$1" >/dev/null 2>&1
+}
+
+# The work queue. Names given on the command line, plus — with --deps — the
+# AUR dependencies found while checking them. queue_aur marks the entries that
+# are built from the AUR whatever the repos carry; queue_for names the package
+# a dependency was found under, for the error message.
+queue=("$@")
+queue_aur=()
+queue_for=()
+for _ in "$@"; do queue_aur+=("$from_aur"); queue_for+=(""); done
+declare -A seen=()
+
 fail=0
-for pkg in "$@"; do
-    # Skip packages already in pacman repos — not AUR, not our concern.
-    if pacman -Si "$pkg" >/dev/null 2>&1; then
+for (( qi = 0; qi < ${#queue[@]}; qi++ )); do
+    pkg=${queue[qi]}
+    [[ -n "${seen[$pkg]:-}" ]] && continue
+    seen[$pkg]=1
+
+    # A name a binary repo carries is what `yay -S` installs from that repo —
+    # unless the caller is building it from the AUR regardless (--from-aur).
+    if (( ! queue_aur[qi] )) && pacman -Si "$pkg" >/dev/null 2>&1; then
         continue
     fi
 
     srcinfo=$(fetch_srcinfo "$pkg") || {
-        echo "[pin-check] ERROR $pkg: cannot fetch .SRCINFO from AUR" >&2
+        if [[ -n "${queue_for[qi]}" ]]; then
+            echo "[pin-check] ERROR $pkg (a dependency of ${queue_for[qi]}): cannot fetch .SRCINFO from AUR" >&2
+            echo "    no repo package satisfies it and the AUR has no package by that name." >&2
+            echo "    If an AUR package PROVIDES it, install that one first, then retry." >&2
+        else
+            echo "[pin-check] ERROR $pkg: cannot fetch .SRCINFO from AUR" >&2
+        fi
         fail=1
         continue
     }
+    base=$(awk '$1 == "pkgbase" { print $3; exit }' <<<"$srcinfo")
+    [[ -n "$base" ]] || base="$pkg"
+
+    if (( walk_deps )); then
+        while IFS= read -r dep; do
+            [[ -n "$dep" ]] || continue
+            dep_met "$dep" && continue
+            dname="${dep%%[<>=]*}"
+            [[ -n "${seen[$dname]:-}" ]] && continue
+            queue+=("$dname"); queue_aur+=(1); queue_for+=("$pkg")
+        done < <(awk -F' = ' '
+            /^[[:space:]]*(depends|makedepends|checkdepends)(_[a-z0-9_]+)? *=/ {print $2}' <<<"$srcinfo")
+    fi
 
     # Extract source URLs. .SRCINFO format: "\tsource = <spec>", plus the
     # arch-specific arrays "\tsource_x86_64 = <spec>" — which are sources
     # exactly as much as the plain array is, and used to be skipped.
     unpinned=()
+    srcinfo_vcs=0
+    allowed=0
+    rejected=0
     while IFS= read -r spec; do
         # Strip optional "local-name::" prefix (e.g. pkgname.tar.gz::https://...)
         url="${spec#*::}"
@@ -199,6 +325,7 @@ for pkg in "$@"; do
             git+*|git://*|hg+*|hg://*|svn+*|svn://*|bzr+*|bzr://*|fossil+*|fossil://*) ;;
             *) continue ;;
         esac
+        srcinfo_vcs=$((srcinfo_vcs + 1))
         is_pinned "$url" && continue
         # Allowlist: tag→SHA verification against recorded expected SHA.
         expected_sha=$(allowlist_sha "$pkg" "$url")
@@ -207,14 +334,16 @@ for pkg in "$@"; do
             if [[ -z "$actual_sha" ]]; then
                 echo "[pin-check] REJECT $pkg: allowlisted source but tag did not resolve:" >&2
                 echo "    $url" >&2
-                fail=1
+                fail=1; rejected=1
             elif [[ "$actual_sha" != "$expected_sha" ]]; then
                 echo "[pin-check] REJECT $pkg: allowlisted tag moved upstream!" >&2
                 echo "    source:   $url" >&2
                 echo "    expected: $expected_sha" >&2
                 echo "    actual:   $actual_sha" >&2
                 echo "    if intentional, update $ALLOWLIST" >&2
-                fail=1
+                fail=1; rejected=1
+            else
+                allowed=$((allowed + 1))
             fi
             continue
         fi
@@ -225,6 +354,36 @@ for pkg in "$@"; do
         echo "[pin-check] REJECT $pkg: ${#unpinned[@]} unpinned VCS source(s):" >&2
         printf '    %s\n' "${unpinned[@]}" >&2
         reject_hints "$pkg"
+        fail=1
+        continue
+    fi
+    (( rejected )) && continue
+
+    # The tripwire: does the PKGBUILD agree with the .SRCINFO it was judged by?
+    # An unpinned VCS URL in the PKGBUILD's source arrays is legitimate only as
+    # an allowlisted tag, so there can be no more of them than were allowed —
+    # and a PKGBUILD naming VCS sources at all, under a .SRCINFO naming none,
+    # is a .SRCINFO that does not describe it.
+    pkgbuild=$(fetch_pkgbuild "$base") || {
+        echo "[pin-check] ERROR $pkg: cannot fetch the PKGBUILD from AUR (needed to confirm the .SRCINFO)" >&2
+        fail=1
+        continue
+    }
+    pb_unpinned=()
+    pb_total=0
+    while IFS= read -r u; do
+        [[ -n "$u" ]] || continue
+        pb_total=$((pb_total + 1))
+        [[ "$u" == *'#commit='* || "$u" == *'#revision='* ]] || pb_unpinned+=("$u")
+    done < <(pkgbuild_vcs_urls <<<"$pkgbuild")
+    if (( ${#pb_unpinned[@]} > allowed || (pb_total > 0 && srcinfo_vcs == 0) )); then
+        echo "[pin-check] REJECT $pkg: the PKGBUILD does not match its .SRCINFO." >&2
+        echo "    .SRCINFO lists $srcinfo_vcs VCS source(s); the PKGBUILD's source arrays name $pb_total," >&2
+        echo "    ${#pb_unpinned[@]} of them without a pinned revision:" >&2
+        printf '    %s\n' "${pb_unpinned[@]:-"(all pinned, but absent from .SRCINFO)"}" >&2
+        echo "    A .SRCINFO that hides a source is how a gate like this one is fooled." >&2
+        echo "    Read the PKGBUILD before trusting this package:" >&2
+        printf '    %s\n' "$(printf "$AUR_PKGBUILD_URL" "$(urlenc "$base")")" >&2
         fail=1
     fi
 done

@@ -52,9 +52,12 @@
 #   4.  the same package is NOT held once the dep becomes satisfiable — the
 #       guard is not a blanket refusal to upgrade foreign packages
 #   5.  a package with no version constraint at all is never held
-#   6.  "installing X breaks dependency ... required by Y" is recovered from by
-#       auto-holding X, and the upgrade completes for everything else
-#   7.  the auto-hold is logged as auto-skipped, and X keeps its old version
+#   6.  "installing X breaks dependency ... required by Y", with Y an AUR
+#       package, is recovered from WITHOUT holding X: the repo upgrade lands in
+#       full (--assume-installed stands in for Y's stale dependency), and Y is
+#       named for a rebuild — the AUR package is the one out of date
+#   7.  X reaches its new version, Y stays installed, and the needed rebuild
+#       is logged
 #   8.  an unrecoverable pacman failure exits non-zero — it is never laundered
 #       into a success by the retry loop
 #   9.  aur-rebuild-check flags a package with a genuinely unresolvable
@@ -107,6 +110,10 @@
 #       owns the running kernel's module directory
 #   29. `aur-rebuild-check --fix` runs the pin-check gate before yay, and
 #       `--noconfirm` reaches yay's --rebuild
+#   30. the same break between two REPOSITORY packages — a mirror mid-sync —
+#       stops the run with nothing changed: nothing can stand in for that
+#   31. an installed alternate interpreter (python311 from the AUR) and the
+#       modules built for it are not flagged as a stale python tree
 #
 # Run as root:  sudo bash tests/loopback-core-test.sh
 # Requires: pacman, repo-add, bsdtar (libarchive), losetup, mkfs.ext4, cc.
@@ -344,34 +351,54 @@ echo ""
 echo "== 6-7. recovery from 'installing X breaks dependency required by Y' =="
 # =============================================================================
 # This break comes from a MANJARO repo, so the pre-flight foreign check cannot
-# see it. pacman refuses the whole transaction; safeup must isolate the one
-# breaking package and let the rest of the upgrade land.
+# see it: Manjaro ships appx 2.0, and consumer — built from the AUR, so in no
+# repository — still declares appx=1.0. pacman refuses the whole transaction.
+# The repo library must NOT be held back: that is the partial-upgrade
+# direction. The repo upgrade lands in full, and the AUR package — the one
+# that is out of date — is named for a rebuild.
 mkenv abibreak
 APPX1=$(mkpkg appx 1.0-1)
 CONS1=$(mkpkg consumer 1.0-1 "appx=1.0")
 OTHER1=$(mkpkg other 1.0-1)
 pacman -U --noconfirm "$APPX1" "$CONS1" "$OTHER1" >/dev/null 2>&1
-publish "$REPO_M" extra \
-    "$(mkpkg appx 2.0-1)" "$(mkpkg other 2.0-1)" "$CONS1"
+publish "$REPO_M" extra "$(mkpkg appx 2.0-1)" "$(mkpkg other 2.0-1)"
 
 out=$(safeup --noconfirm </dev/null 2>&1); rc=$?
-if grep -q 'ABI/dep break detected' <<<"$out" && grep -q '  - appx' <<<"$out"; then
-    pass "the breaking package was identified from pacman's own message"
+if grep -q "consumer (AUR) needs 'appx=1.0'" <<<"$out" && grep -q 'rebuild: aurinstall consumer' <<<"$out"; then
+    pass "the broken AUR package was identified from pacman's own message and named for rebuild"
 else
-    fail "ABI break not detected: $(grep -i 'break\|error' <<<"$out" | head -3)"
+    fail "AUR break not reported: $(grep -i 'break\|error\|needs' <<<"$out" | head -3)"
 fi
 [ "$rc" = "0" ] \
-    && pass "upgrade completed after auto-holding the breaking package" \
+    && pass "the repo upgrade completed" \
     || { fail "safeup exited $rc instead of recovering"; echo "--- output ---"; echo "$out" | tail -30; echo "--- end ---"; }
-[ "$(installed_ver appx)" = "1.0-1" ] \
-    && pass "appx kept its old version (the hold was real)" \
-    || fail "appx moved to $(installed_ver appx) — the break was not held"
+[ "$(installed_ver appx)" = "2.0-1" ] \
+    && pass "appx reached 2.0-1 — the repo library was NOT held back" \
+    || fail "appx stuck at $(installed_ver appx) — a repo library was held: a partial upgrade"
 [ "$(installed_ver other)" = "2.0-1" ] \
-    && pass "unrelated package 'other' still got its upgrade" \
+    && pass "unrelated package 'other' got its upgrade too" \
     || fail "other stuck at $(installed_ver other) — one break blocked everything"
-grep -q 'auto-skipped' "$SAFEUP_LOG" && grep -q 'appx' "$SAFEUP_LOG" \
-    && pass "auto-skip recorded in \$SAFEUP_LOG" \
-    || fail "auto-skipped package not logged"
+[ "$(installed_ver consumer)" = "1.0-1" ] \
+    && pass "the AUR package is left installed, for its rebuild" \
+    || fail "consumer changed: '$(installed_ver consumer)'"
+grep -q 'needs AUR rebuild' "$SAFEUP_LOG" && grep -q 'consumer' "$SAFEUP_LOG" \
+    && pass "the needed rebuild is recorded in \$SAFEUP_LOG" \
+    || fail "needed rebuild not logged"
+
+# 30. The same break where the dependent is a REPOSITORY package: the repos
+# disagree with each other (a mirror mid-sync). Nothing stands in for that.
+mkenv midsync
+APPY1=$(mkpkg appy 1.0-1)
+RCONS1=$(mkpkg rconsumer 1.0-1 "appy=1.0")
+pacman -U --noconfirm "$APPY1" "$RCONS1" >/dev/null 2>&1
+publish "$REPO_M" extra "$(mkpkg appy 2.0-1)" "$RCONS1"
+out=$(safeup --noconfirm </dev/null 2>&1); rc=$?
+if [ "$rc" != "0" ] && grep -q 'mirror is mid-sync' <<<"$out" \
+   && [ "$(installed_ver appy)" = "1.0-1" ] && [ "$(installed_ver rconsumer)" = "1.0-1" ]; then
+    pass "a break between two repo packages stops the run, changing nothing"
+else
+    fail "mid-sync repos were not refused (rc=$rc, appy=$(installed_ver appy)): $(tail -5 <<<"$out")"
+fi
 
 # =============================================================================
 echo ""
@@ -587,7 +614,22 @@ fi
 grep -q 'newpy' <<<"$out" \
     && fail "package under the CURRENT python3.13 dir was flagged" \
     || pass "package under the current interpreter's site-packages is not flagged"
-pacman -R --noconfirm oldpy newpy python >/dev/null 2>&1
+pacman -R --noconfirm oldpy newpy >/dev/null 2>&1
+
+# 31. An alternate interpreter is not a stale tree. python311 from the AUR
+# owns /usr/lib/python3.11/ on purpose, and so does a module built for it;
+# flagging them meant a rebuild nag on every safeup run, forever.
+echo '# stdlib marker' > "$ELF/os.py"
+pacman -U --noconfirm \
+    "$(mkpkg python311 3.11.9-1 --at usr/lib/python3.11 --files "$ELF/os.py")" \
+    "$(mkpkg py311mod 1.0-1 --at usr/lib/python3.11/site-packages --files "$ELF/mod.py")" >/dev/null 2>&1
+out=$(aur-rebuild-check 2>&1); rc=$?
+if [ "$rc" = "0" ] && ! grep -q 'python311\|py311mod' <<<"$out"; then
+    pass "an installed alternate interpreter and its modules are not flagged"
+else
+    fail "alternate interpreter flagged as stale (rc=$rc): $out"
+fi
+pacman -R --noconfirm py311mod python311 python >/dev/null 2>&1
 
 # 29. --fix must not become a way around the gate: a rebuild goes through
 # aur-pin-check first, and only a clean set reaches yay. .SRCINFO comes from a
@@ -595,6 +637,7 @@ pacman -R --noconfirm oldpy newpy python >/dev/null 2>&1
 if [ -f "$ELF/libmain.so" ] && curl -V 2>/dev/null | grep -q '\bfile\b'; then
     pacman -U --noconfirm "$ENV_DIR/build/brokenapp-1.0-1-$ARCH.pkg.tar.gz" >/dev/null 2>&1
     export AUR_SRCINFO_URL="file://$ENV_DIR/%s.SRCINFO" AUR_RPC_URL="file://$ENV_DIR/%s.json"
+    export AUR_PKGBUILD_URL="file://$ENV_DIR/%s.PKGBUILD"
     printf 'pkgbase = brokenapp\n\tsource = git+https://example.invalid/b.git\n\npkgname = brokenapp\n' \
         > "$ENV_DIR/brokenapp.SRCINFO"
     : > "$ENV_DIR/yay.log"
@@ -606,6 +649,9 @@ if [ -f "$ELF/libmain.so" ] && curl -V 2>/dev/null | grep -q '\bfile\b'; then
     fi
     printf 'pkgbase = brokenapp\n\tsource = git+https://example.invalid/b.git#commit=0123456789abcdef0123456789abcdef01234567\n\npkgname = brokenapp\n' \
         > "$ENV_DIR/brokenapp.SRCINFO"
+    # The PKGBUILD the .SRCINFO describes: the pin check reads both.
+    printf 'pkgname=brokenapp\nsource=("git+https://example.invalid/b.git#commit=0123456789abcdef0123456789abcdef01234567")\n' \
+        > "$ENV_DIR/brokenapp.PKGBUILD"
     : > "$ENV_DIR/yay.log"
     aur-rebuild-check --fix --noconfirm >/dev/null 2>&1
     if grep -q -- '-S --rebuild --noconfirm brokenapp' "$ENV_DIR/yay.log"; then
@@ -613,7 +659,7 @@ if [ -f "$ELF/libmain.so" ] && curl -V 2>/dev/null | grep -q '\bfile\b'; then
     else
         fail "--fix did not rebuild a clean package: $(cat "$ENV_DIR/yay.log")"
     fi
-    unset AUR_SRCINFO_URL AUR_RPC_URL
+    unset AUR_SRCINFO_URL AUR_RPC_URL AUR_PKGBUILD_URL
     pacman -R --noconfirm brokenapp >/dev/null 2>&1
 else
     skip "29: needs the broken ELF from 9-11 and a curl with file:// support"

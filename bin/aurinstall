@@ -5,6 +5,8 @@
 # Blocks installs whose PKGBUILDs contain VCS sources without an immutable
 # revision pin (see aur-pin-check for the per-VCS rule). Non-VCS sources are
 # unaffected (their integrity is already covered by PKGBUILD sha256sums).
+# Every AUR dependency the build would pull in is checked too, on every path:
+# yay builds those as readily as the package you named.
 #
 # Usage:
 #   aurinstall pkg1 pkg2 ...            # auto: chroot when it will work
@@ -70,6 +72,16 @@
 #      linux-aarhus's flightgear experiment ("source does not exist"); no
 #      build order fixes an absent source, and that chain goes to yay instead.
 #
+# What gets built is what was checked. The chain is cloned FIRST, and the
+# pin check then reads each clone's own .SRCINFO and PKGBUILD -- with
+# --from-aur, since a name a binary repo also carries (chaotic-aur carries AUR
+# names) is still built from the AUR here. A push between the first check and
+# the clone cannot slip through.
+#
+# On a terminal, the build waits for one [Y/n/v] answer: v pages through the
+# PKGBUILDs about to run, which is the only real defence against a hostile
+# maintainer -- a PKGBUILD is code, and no pin check reads intent.
+#
 # After the build, the result is installed with `pacman -U` — that is what
 # you asked for when you typed `aurinstall`. On a terminal it is one [Y/n]
 # prompt away, so you can stop and inspect first; --install and --no-install
@@ -111,7 +123,7 @@ for a in "$@"; do
         --clean)      clean=1 ;;
         --install)    install_after=yes ;;
         --no-install) install_after=no ;;
-        -h|--help) /usr/bin/sed -n '2,39p' "$0" | /usr/bin/sed 's/^# \?//'; exit 0 ;;
+        -h|--help) /usr/bin/sed -n '2,41p' "$0" | /usr/bin/sed 's/^# \?//'; exit 0 ;;
         -*) die "unknown option: $a (try --help)" ;;
         *) pkgs+=("$a") ;;
     esac
@@ -126,15 +138,31 @@ if (( ${#pkgs[@]} == 0 )); then
     exit 2
 fi
 
-# --- the gate, unchanged and unconditional ----------------------------------
-if ! aur-pin-check "${pkgs[@]}"; then
+# --- the gate, unconditional --------------------------------------------------
+# --deps: the AUR dependencies the build pulls in are as much a supply-chain
+# hole as the targets, and on the yay path nothing else would look at them.
+if ! aur-pin-check --deps "${pkgs[@]}"; then
     echo "" >&2
-    echo "[aurinstall] aborting — one or more packages have unpinned VCS sources." >&2
-    echo "[aurinstall] override: yay -S ${pkgs[*]}" >&2
+    echo "[aurinstall] aborting — the pin check refused a package or one of its AUR dependencies." >&2
+    echo "[aurinstall] override, once you have read the PKGBUILDs: yay -S ${pkgs[*]}" >&2
     exit 1
 fi
 
 # --- helpers the gate needs -------------------------------------------------
+
+# Percent-encode a package name for a URL ('+' would otherwise reach cgit and
+# the RPC as a space). The same function as aur-pin-check's.
+urlenc() {
+    local s="$1" out="" c i
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        case "$c" in
+            [A-Za-z0-9._~-]) out+="$c" ;;
+            *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
 
 # Where chrootbuild will leave the artifact. This mirrors chrootbuild's own
 # lookup exactly (util.sh get_mp_conf/query_conf): it runs under sudo and reads
@@ -158,15 +186,15 @@ mp_conf_value() {
 # fetch retried once. The RPC round-trip is on the failure path only.
 fetch_srcinfo() { # $1 = pkg; prints .SRCINFO or fails
     local url body rpc base
-    printf -v url "$AUR_BASE" "$1"
+    printf -v url "$AUR_BASE" "$(urlenc "$1")"
     if body=$(curl -fsSL --max-time 15 "$url" 2>/dev/null) && [[ -n "$body" ]]; then
         printf '%s\n' "$body"; return 0
     fi
-    printf -v rpc "$AUR_RPC" "$1"
+    printf -v rpc "$AUR_RPC" "$(urlenc "$1")"
     base=$(curl -fsSL --max-time 10 "$rpc" 2>/dev/null \
            | /usr/bin/grep -oE '"PackageBase":"[^"]+"' | head -1 | cut -d'"' -f4)
     [[ -n "$base" && "$base" != "$1" ]] || return 1
-    printf -v url "$AUR_BASE" "$base"
+    printf -v url "$AUR_BASE" "$(urlenc "$base")"
     curl -fsSL --max-time 15 "$url" 2>/dev/null
 }
 
@@ -327,20 +355,12 @@ else
     [[ -w "$keep_dir" ]] || keep_dir="$HOME"
 fi
 
-# The chain was resolved by the gate: dependencies first, targets last. Extra
-# members pulled in as dependencies were never pin-checked (only the command
-# line was), and an unvetted dep is the same supply-chain hole as an unvetted
-# target — gate them too before anything is cloned.
+# The chain was resolved by the gate: dependencies first, targets last.
 chain_extra=()
 for pkg in "${CHAIN[@]}"; do
     [[ -n "${CHAIN_REQUESTED[$pkg]:-}" ]] || chain_extra+=("$pkg")
 done
-if (( ${#chain_extra[@]} > 0 )); then
-    msg "chain pulls in: ${chain_extra[*]} — pin-checking those too"
-    if ! aur-pin-check "${chain_extra[@]}"; then
-        die "a chained dependency failed the pin check — nothing was built"
-    fi
-fi
+(( ${#chain_extra[@]} > 0 )) && msg "chain pulls in: ${chain_extra[*]}"
 
 msg "branch: $branch   chroot: /var/lib/chrootbuild   PKGDEST: $pkgdest"
 msg "build order: ${CHAIN[*]}"
@@ -349,6 +369,36 @@ for pkg in "${CHAIN[@]}"; do
     git clone --quiet "${AUR_GIT_BASE}/${pkg}.git" "$workdir/$pkg" \
         || die "could not clone $pkg from the AUR"
 done
+
+# Check what will be BUILT: each clone's own .SRCINFO and PKGBUILD, every
+# member of the chain. The gate at the top read the AUR at an earlier moment,
+# and skipped any name a binary repo carries -- which this path builds from
+# the AUR anyway -- so neither of those checks covers the bytes in $workdir.
+msg "pin-checking the cloned build chain"
+if ! AUR_SRCINFO_URL="file://$workdir/%s/.SRCINFO" \
+     AUR_PKGBUILD_URL="file://$workdir/%s/PKGBUILD" \
+     aur-pin-check --from-aur "${CHAIN[@]}"; then
+    die "a package in the cloned build chain failed the pin check — nothing was built"
+fi
+
+# One answer on a terminal before anything runs: build, stop, or view the
+# PKGBUILDs first. Without a terminal there is nobody to ask, and the build
+# goes ahead exactly as before.
+if { : </dev/tty; } 2>/dev/null; then
+    while :; do
+        read -r -p "[aurinstall] build ${CHAIN[*]} in the chroot? [Y/n/v = view PKGBUILDs] " ans </dev/tty || ans=n
+        case "$ans" in
+            ""|y|Y|yes|Yes) break ;;
+            v|V)
+                pager=(cat); command -v less >/dev/null 2>&1 && pager=(less)
+                for pkg in "${CHAIN[@]}"; do
+                    printf '==> %s/PKGBUILD\n' "$pkg"; cat "$workdir/$pkg/PKGBUILD"; echo
+                done | "${pager[@]}" >/dev/tty
+                ;;
+            *) msg "stopped — nothing was built"; exit 1 ;;
+        esac
+    done
+fi
 
 # One chrootbuild invocation for the whole chain: -p dep2 -n -p dep1 -n -p tgt.
 # In chrootbuild -n is a single global switch ("install each built package

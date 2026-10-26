@@ -1,8 +1,8 @@
 {
-	"answerdiff": "None",
+	"answerdiff": "",
 	"answerclean": "None",
 	"cleanmenu": false,
-	"diffmenu": false,
+	"diffmenu": true,
 	"editmenu": false,
 	"combinedupgrade": true,
 	"cleanAfter": false,

@@ -55,14 +55,15 @@
 #   18. aurupdate pin-checks the pending set and aborts on a failure
 #   19. --chroot still runs the pin-check gate first, and an unpinned package
 #       never reaches chrootbuild
-#   20. --chroot refuses an UNRESOLVABLE chain (dep missing from the AUR)
-#       before spending a chroot build on it
+#   20. a dependency in no repo and not in the AUR is refused by the gate
+#       itself, before any chroot build or yay run is spent on it
 #   21. --chroot always passes an explicit -b <branch>; chrootbuild's default
 #       is 'unstable', and building against the wrong branch still exits 0
 #       while producing exactly the soname mismatch this suite exists to stop
 #   22. --chroot builds the package it was asked for
 #   23. auto mode (no flag) uses the chroot when the package is eligible
-#   24. auto mode falls back to yay when the chain cannot resolve, REPORTING why
+#   24. auto mode falls back to yay on a chain the chroot will not build
+#       (deeper than AURINSTALL_MAX_CHAIN), REPORTING why
 #   25. auto mode sends *-bin to yay: nothing is compiled, so a chroot cannot
 #       change the shipped ELF and would only cost a chroot sync
 #   26. an explicit --chroot on an ineligible package is an ERROR -- forcing a
@@ -92,6 +93,22 @@
 #       temp dir before the "install later" message could even be read
 #   39. --install installs the artifact without a prompt; --no-install never
 #       touches pacman -U
+#   40. a name a binary repo also carries (chaotic-aur carries AUR names) is
+#       skipped for yay but checked with --from-aur — and the chroot, which
+#       builds the AUR copy regardless, refuses it when it is unpinned
+#   41. a source pushed after the check but before the clone is caught: the
+#       chroot pin-checks the clone it is about to build
+#   42. on the yay path, an unpinned AUR DEPENDENCY is refused; yay never runs
+#   43. aurupdate refuses a pending upgrade whose new AUR dependency is unpinned
+#   44. a dependency met by an installed package is not walked by --deps
+#   45. ...nor one met by a binary repo — yay builds neither
+#   46. a name containing '+' is requested URL-encoded; sent raw, the AUR read
+#       '+' as a space and the package could never pass
+#   47. a .SRCINFO that shows a pin over a PKGBUILD that has none is REJECTED
+#   48. a VCS source in the PKGBUILD that the .SRCINFO omits entirely is REJECTED
+#   49. variables in a pin, a VCS-looking pkgdesc, comments and build() do not
+#       trip the tripwire
+#   50. a PKGBUILD that cannot be fetched is an ERROR, never a pass
 #
 # Run:  bash tests/pin-fixture-test.sh
 # Requires: bash >= 4, git, curl (with file:// support), awk, coreutils.
@@ -118,28 +135,33 @@ trap cleanup EXIT
 # from the repository root used to leave *.pkg.tar.zst files in the checkout.
 cd "$WORK" || exit 1
 
-mkdir -p "$WORK/srcinfo" "$WORK/rpc" "$WORK/shim" "$WORK/git"
+mkdir -p "$WORK/srcinfo" "$WORK/pkgbuild" "$WORK/rpc" "$WORK/shim" "$WORK/git"
 
 # --- the environment every invocation below runs under -----------------------
 # Endpoints point at local files; the allowlist points at a fixture we rewrite
 # between cases. PATH is prefixed with stubs so nothing reaches the real system.
 export AUR_SRCINFO_URL="file://$WORK/srcinfo/%s.SRCINFO"
+export AUR_PKGBUILD_URL="file://$WORK/pkgbuild/%s.PKGBUILD"
 export AUR_RPC_URL="file://$WORK/rpc/%s.json"
 export AUR_PIN_ALLOWLIST="$WORK/allowlist.conf"
 export PATH="$WORK/shim:$BIN:$PATH"
 : > "$WORK/allowlist.conf"
 
-# pacman stub. aur-pin-check asks two questions of it and nothing else:
-#   -Si <pkg>  → is this package in a binary repo? (then it is not our problem)
+# pacman stub. aur-pin-check asks it these questions and nothing else:
+#   -Si <pkg>   → is this package in a binary repo? (then it is not our problem)
+#   -T / -Sddp  → is a dependency met by an installed / a repo package? (--deps)
 #   -Qq / -Qdtq → is it installed, and is it an orphan? (triage hints only)
-# $WORK/repo-pkgs and $WORK/orphan-pkgs drive the answers.
+# $WORK/repo-pkgs, $WORK/installed and $WORK/orphans drive the answers; a
+# dependency is judged by its name, version constraint ignored.
 cat > "$WORK/shim/pacman" <<'SHIM'
 #!/bin/bash
+last="${*: -1}"; dname="${last%%[<>=]*}"
 case "$1" in
   -Si)   grep -qxF -- "$2" "$WORK_REPO_PKGS" 2>/dev/null && { echo "Repository : extra"; exit 0; }; exit 1 ;;
+  -T)    grep -qxF -- "$dname" "$WORK_INSTALLED" 2>/dev/null && exit 0; exit 127 ;;
+  -Sddp) grep -qxF -- "$dname" "$WORK_REPO_PKGS" 2>/dev/null && exit 0; exit 1 ;;
   -Qq)   grep -qxF -- "$2" "$WORK_INSTALLED" 2>/dev/null && { echo "$2"; exit 0; }; exit 1 ;;
   -Qdtq) cat "$WORK_ORPHANS" 2>/dev/null; exit 0 ;;
-  -Sddp) exit 1 ;;   # nothing in the fixture repos satisfies a dependency
   -U)    printf '%s\n' "$*" >> "$WORK_PACMAN_LOG"; exit 0 ;;
   *)     exit 1 ;;
 esac
@@ -174,6 +196,19 @@ chmod +x "$WORK/shim/yay"
 export WORK_YAY_LOG="$WORK/yay.log" WORK_YAY_QUA="$WORK/yay-qua"
 : > "$WORK_YAY_LOG"; : > "$WORK_YAY_QUA"
 
+# curl wrapper: the real curl, with every URL it was asked for logged. A
+# file:// fixture reads '+' literally, where the AUR's web server reads it as a
+# space, so only the URL itself shows whether a name was encoded (case 46).
+REAL_CURL=$(command -v curl)
+cat > "$WORK/shim/curl" <<SHIM
+#!/bin/bash
+printf '%s\n' "\${*: -1}" >> "\$WORK_CURL_LOG"
+exec "$REAL_CURL" "\$@"
+SHIM
+chmod +x "$WORK/shim/curl"
+export WORK_CURL_LOG="$WORK/curl.log"
+: > "$WORK_CURL_LOG"
+
 # chrootbuild + pacman-mirrors stubs, for --chroot mode. chrootbuild records
 # its argv so we can assert on the branch flag rather than assume it.
 cat > "$WORK/shim/chrootbuild" <<'SHIM'
@@ -201,14 +236,22 @@ chmod +x "$WORK/shim/chrootbuild" "$WORK/shim/pacman-mirrors" "$WORK/shim/sudo"
 export WORK_CB_LOG="$WORK/chrootbuild.log"
 : > "$WORK_CB_LOG"
 
-# Write a .SRCINFO fixture: srcinfo <pkg> <source-line>...
+# Write a .SRCINFO fixture: srcinfo <pkg> <source-line>... — and the PKGBUILD
+# it describes, with the same sources, since the pin check compares the two.
 srcinfo() {
     local pkg="$1"; shift
     { printf 'pkgbase = %s\n\tpkgver = 1.0\n\tpkgrel = 1\n' "$pkg"
       for s in "$@"; do printf '\tsource = %s\n' "$s"; done
       printf '\npkgname = %s\n' "$pkg"
     } > "$WORK/srcinfo/$pkg.SRCINFO"
+    { printf 'pkgname=%s\npkgver=1.0\npkgrel=1\nsource=(' "$pkg"
+      for s in "$@"; do printf '"%s"\n        ' "$s"; done
+      printf ')\n'
+    } > "$WORK/pkgbuild/$pkg.PKGBUILD"
 }
+
+# Replace only the PKGBUILD fixture: pkgbuild <pkg> <file-content>
+pkgbuild() { printf '%s\n' "$2" > "$WORK/pkgbuild/$1.PKGBUILD"; }
 
 # Write an AUR RPC fixture: rpc <pkg> <resultcount> [pkgbase]
 rpc() {
@@ -454,12 +497,15 @@ echo "== 19-22. aurinstall --chroot =="
 
 # A local "AUR" to clone from, so no network is touched.
 AURGIT="$WORK/aurgit"; mkdir -p "$AURGIT"
+# Each repo carries the package's current .SRCINFO and PKGBUILD fixtures, as a
+# real AUR repo does: aurinstall pin-checks the CLONE, not the fetched copy.
 mk_aur_repo() {
     local pkg="$1"
     local d="$AURGIT/$pkg.git"
     rm -rf "$d"; mkdir -p "$d"
-    ( cd "$d" && git init -q . && printf 'pkgname=%s\npkgver=1.0\n' "$pkg" > PKGBUILD \
-      && git add PKGBUILD \
+    cp "$WORK/srcinfo/$pkg.SRCINFO" "$d/.SRCINFO"
+    cp "$WORK/pkgbuild/$pkg.PKGBUILD" "$d/PKGBUILD"
+    ( cd "$d" && git init -q . && git add PKGBUILD .SRCINFO \
       && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
 }
 export AUR_GIT_BASE="file://$AURGIT"
@@ -473,18 +519,20 @@ else
     fail "--chroot bypassed the pin-check gate (rc=$rc)"
 fi
 
-# 20. AUR dependencies are detected up front and refused
+# 20. a dependency that is in no repo and not in the AUR is refused up front,
+# by the gate, before a chroot build or a yay run is spent on it — it cannot
+# be checked, and an unchecked package is never a pass
 srcinfo needsaur "https://example.invalid/x.tar.gz"
 printf '\tdepends = totally-not-a-real-package-xyz\n' >> "$WORK/srcinfo/needsaur.SRCINFO"
 rpc needsaur 1
 mk_aur_repo needsaur
-: > "$WORK_CB_LOG"
+: > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
 out=$(aurinstall --chroot needsaur 2>&1); rc=$?
-if (( rc == 2 )) && grep -q 'cannot chain-build needsaur' <<<"$out" \
-   && grep -q 'not fetchable' <<<"$out" && [[ ! -s "$WORK_CB_LOG" ]]; then
-    pass "--chroot refuses an unresolvable chain before spending a chroot build"
+if (( rc == 1 )) && grep -q 'totally-not-a-real-package-xyz (a dependency of needsaur)' <<<"$out" \
+   && [[ ! -s "$WORK_CB_LOG" && ! -s "$WORK_YAY_LOG" ]]; then
+    pass "an uncheckable dependency is refused by the gate before any build"
 else
-    fail "--chroot did not refuse an unresolvable chain (rc=$rc)"
+    fail "uncheckable dependency was not refused up front (rc=$rc): $out"
 fi
 
 # 21. a clean package reaches chrootbuild WITH an explicit branch
@@ -516,15 +564,18 @@ else
     fail "auto mode did not choose the chroot (cb='$(cat "$WORK_CB_LOG")')"
 fi
 
-# 24. a package with AUR deps falls back to yay, and SAYS SO
+# 24. a chain the chroot will not build (here: deeper than AURINSTALL_MAX_CHAIN)
+# falls back to yay, and SAYS SO
+srcinfo helperdep "https://example.invalid/hd.tar.gz"
+rpc helperdep 1; mk_aur_repo helperdep
 srcinfo needsaur2 "https://example.invalid/x.tar.gz"
-printf '\tdepends = totally-not-a-real-package-xyz\n' >> "$WORK/srcinfo/needsaur2.SRCINFO"
+printf '\tdepends = helperdep\n' >> "$WORK/srcinfo/needsaur2.SRCINFO"
 rpc needsaur2 1; mk_aur_repo needsaur2
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
-out=$(aurinstall needsaur2 </dev/null 2>&1)
+out=$(AURINSTALL_MAX_CHAIN=1 aurinstall needsaur2 </dev/null 2>&1)
 if grep -q -- '-S needsaur2' "$WORK_YAY_LOG" && [[ ! -s "$WORK_CB_LOG" ]] \
    && grep -q 'using yay: cannot chain-build' <<<"$out"; then
-    pass "auto mode falls back to yay on an unresolvable chain, reporting why"
+    pass "auto mode falls back to yay on a chain it will not build, reporting why"
 else
     fail "auto fallback wrong (yay='$(cat "$WORK_YAY_LOG")', said: $(grep -c 'using yay' <<<"$out"))"
 fi
@@ -543,7 +594,7 @@ fi
 
 # 26. --chroot on an ineligible package is an ERROR, never a silent fallback
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
-out=$(aurinstall --chroot needsaur2 </dev/null 2>&1); rc=$?
+out=$(AURINSTALL_MAX_CHAIN=1 aurinstall --chroot needsaur2 </dev/null 2>&1); rc=$?
 if (( rc == 2 )) && grep -q 'cannot be used here' <<<"$out" \
    && [[ ! -s "$WORK_YAY_LOG" ]]; then
     pass "--chroot refuses an ineligible package instead of quietly using yay"
@@ -583,8 +634,8 @@ fi
 srcinfo chdep2 "git+https://example.invalid/evil.git"
 : > "$WORK_CB_LOG"; : > "$WORK_YAY_LOG"
 out=$(aurinstall chtarget </dev/null 2>&1); rc=$?
-if (( rc == 2 )) && grep -q 'chained dependency failed the pin check' <<<"$out" \
-   && [[ ! -s "$WORK_CB_LOG" ]]; then
+if (( rc == 1 )) && grep -q 'REJECT chdep2' <<<"$out" \
+   && [[ ! -s "$WORK_CB_LOG" && ! -s "$WORK_YAY_LOG" ]]; then
     pass "an unpinned CHAINED dependency stops the build — deps are gated too"
 else
     fail "poisoned chained dep was not caught (rc=$rc)"
@@ -618,6 +669,7 @@ rpc     signedpin 1
 { printf 'pkgbase = archsrc\n\tpkgver = 1.0\n\tpkgrel = 1\n'
   printf '\tsource_x86_64 = git+https://example.invalid/arch.git\n'
   printf '\npkgname = archsrc\n'; } > "$WORK/srcinfo/archsrc.SRCINFO"
+pkgbuild archsrc 'source_x86_64=("git+https://example.invalid/arch.git")'
 rpc archsrc 1
 rc=$(check archsrc)
 if [[ $rc == 1 ]] && grep -q 'arch.git' "$WORK/out"; then
@@ -710,6 +762,153 @@ if grep -q -- '-U .*cleanpkg-1.0-1-x86_64.pkg.tar.zst' "$WORK_PACMAN_LOG"; then
     pass "--install runs pacman -U on the built artifact without a prompt"
 else
     fail "--install did not install: $(cat "$WORK_PACMAN_LOG")"
+fi
+
+# =============================================================================
+echo "== 40-41. what the chroot BUILDS is what gets checked =="
+# =============================================================================
+# 40. chaotic-aur carries AUR names. `yay -S` would install that repo copy, so
+# a plain check skips the name — but the chroot builds the AUR's copy anyway.
+srcinfo chaoticpkg "git+https://example.invalid/chaotic.git"
+rpc chaoticpkg 1; mk_aur_repo chaoticpkg
+echo chaoticpkg > "$WORK_REPO_PKGS"
+if [[ $(check chaoticpkg) == 0 && $(check --from-aur chaoticpkg) == 1 ]]; then
+    pass "a repo-carried name is skipped for yay, and checked with --from-aur"
+else
+    fail "--from-aur did not check a repo-carried name"
+fi
+: > "$WORK_CB_LOG"
+out=$(aurinstall --no-install chaoticpkg </dev/null 2>&1); rc=$?
+if (( rc == 2 )) && grep -q 'REJECT chaoticpkg' <<<"$out" && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "the chroot refuses to build the AUR copy of a repo-carried name with an unpinned source"
+else
+    fail "chroot built an unchecked repo-carried name (rc=$rc, cb='$(cat "$WORK_CB_LOG")')"
+fi
+: > "$WORK_REPO_PKGS"
+
+# 41. a push between the gate and the clone: the AUR said one thing when it
+# was checked, and the clone that gets built says another
+srcinfo racepkg "https://example.invalid/race.tar.gz"
+rpc racepkg 1; mk_aur_repo racepkg
+printf 'pkgbase = racepkg\n\tsource = git+https://example.invalid/late.git\n\npkgname = racepkg\n' \
+    > "$AURGIT/racepkg.git/.SRCINFO"
+printf 'pkgname=racepkg\nsource=("git+https://example.invalid/late.git")\n' > "$AURGIT/racepkg.git/PKGBUILD"
+git -C "$AURGIT/racepkg.git" -c user.email=t@t -c user.name=t commit -qam late >/dev/null 2>&1
+: > "$WORK_CB_LOG"
+out=$(aurinstall --no-install racepkg </dev/null 2>&1); rc=$?
+if (( rc == 2 )) && grep -q 'cloned build chain failed' <<<"$out" && [[ ! -s "$WORK_CB_LOG" ]]; then
+    pass "a source pushed after the check but before the clone is caught in the clone"
+else
+    fail "the clone was built unchecked (rc=$rc)"
+fi
+
+# =============================================================================
+echo "== 42-45. --deps: the AUR dependencies yay would build =="
+# =============================================================================
+srcinfo yaydep "git+https://example.invalid/yaydep.git"
+rpc yaydep 1
+srcinfo yaytop "https://example.invalid/yaytop.tar.gz"
+printf '\tdepends = yaydep>=1.0\n' >> "$WORK/srcinfo/yaytop.SRCINFO"
+rpc yaytop 1
+
+# 42. the yay path: before, only the named package was checked
+: > "$WORK_YAY_LOG"
+out=$(aurinstall --no-chroot yaytop </dev/null 2>&1); rc=$?
+if (( rc == 1 )) && grep -q 'REJECT yaydep' <<<"$out" && [[ ! -s "$WORK_YAY_LOG" ]]; then
+    pass "aurinstall --no-chroot refuses an unpinned AUR dependency; yay never runs"
+else
+    fail "an unpinned AUR dependency reached yay (rc=$rc, yay='$(cat "$WORK_YAY_LOG")')"
+fi
+
+# 43. aurupdate: an upgrade can bring in a new AUR dependency
+printf 'yaytop 1.0 -> 2.0\n' > "$WORK_YAY_QUA"
+: > "$WORK_YAY_LOG"
+aurupdate >/dev/null 2>&1; rc=$?
+if (( rc == 1 )) && ! grep -q -- '-Sua' "$WORK_YAY_LOG"; then
+    pass "aurupdate refuses a pending upgrade whose new AUR dependency is unpinned"
+else
+    fail "aurupdate let an unpinned AUR dependency through (rc=$rc)"
+fi
+: > "$WORK_YAY_QUA"
+
+# 44-45. a dependency yay will NOT build is not walked: one an installed
+# package meets, and one a binary repo meets. Walking those would refuse
+# packages over sources nobody is about to build.
+srcinfo yaytop2 "https://example.invalid/yaytop2.tar.gz"
+printf '\tdepends = instdep\n\tmakedepends = repodep\n' >> "$WORK/srcinfo/yaytop2.SRCINFO"
+rpc yaytop2 1
+echo instdep > "$WORK_INSTALLED"; echo repodep > "$WORK_REPO_PKGS"
+[[ $(check --deps yaytop2) == 0 ]] \
+    && pass "a dependency met by an installed package is not walked" \
+    || fail "an installed dependency was walked: $(cat "$WORK/out")"
+: > "$WORK_INSTALLED"
+echo instdep > "$WORK_REPO_PKGS"; echo repodep >> "$WORK_REPO_PKGS"
+[[ $(check --deps yaytop2) == 0 ]] \
+    && pass "a dependency met by a binary repo is not walked" \
+    || fail "a repo dependency was walked: $(cat "$WORK/out")"
+: > "$WORK_REPO_PKGS"
+
+# =============================================================================
+echo "== 46. package names containing '+' =="
+# =============================================================================
+# Sent raw, '+' reaches cgit and the RPC as a space: `aewm++` was a 404 and
+# could never pass. Encoded, the file:// fixture resolves exactly as cgit does.
+srcinfo 'aewm++' "https://example.invalid/aewm.tar.gz"
+rpc 'aewm++' 1
+: > "$WORK_CURL_LOG"
+rc=$(check 'aewm++')
+if [[ $rc == 0 ]] && grep -q 'aewm%2B%2B' "$WORK_CURL_LOG" && ! grep -qF 'aewm++' "$WORK_CURL_LOG"; then
+    pass "'aewm++' is requested as aewm%2B%2B, fetched and judged"
+else
+    fail "a '+' name was sent unencoded (rc=$rc): $(cat "$WORK_CURL_LOG")"
+fi
+
+# =============================================================================
+echo "== 47-50. the PKGBUILD tripwire =="
+# =============================================================================
+# 47. the spoof: a .SRCINFO showing a pin, over a PKGBUILD that has none
+srcinfo spoofed "git+https://example.invalid/s.git#commit=$SHA_A"
+rpc spoofed 1
+pkgbuild spoofed 'source=("git+https://example.invalid/evil.git")'
+rc=$(check spoofed)
+if [[ $rc == 1 ]] && grep -q 'does not match its .SRCINFO' "$WORK/out" && grep -q 'evil.git' "$WORK/out"; then
+    pass "a .SRCINFO that hides an unpinned PKGBUILD source is REJECTED"
+else
+    fail "spoofed .SRCINFO accepted (rc=$rc)"
+fi
+
+# 48. a PKGBUILD naming a VCS source under a .SRCINFO that names none
+srcinfo spoofed2 "https://example.invalid/s.tar.gz"
+rpc spoofed2 1
+pkgbuild spoofed2 "source=(\"git+https://example.invalid/x.git#commit=$SHA_A\")"
+[[ $(check spoofed2) == 1 ]] \
+    && pass "a VCS source missing from .SRCINFO entirely is REJECTED" \
+    || fail "a VCS source absent from .SRCINFO was accepted"
+
+# 49. no false alarm on what real PKGBUILDs look like: variables in the pin,
+# a VCS-looking string in pkgdesc, a commented-out source, a multi-line array
+srcinfo realistic "git+https://example.invalid/r.git#commit=$SHA_A" "https://example.invalid/r.patch"
+rpc realistic 1
+pkgbuild realistic 'pkgname=realistic
+pkgdesc="a git+svn bridge"
+_commit=0123456789abcdef0123456789abcdef01234567
+# source=(git+https://example.invalid/old.git)
+source=("git+$url.git#commit=${_commit}"   # git+https://in.a.comment
+        "r.patch::https://example.invalid/r.patch")
+build() { echo git+https://not.a.source; }'
+[[ $(check realistic) == 0 ]] \
+    && pass "variables, pkgdesc, comments and build() do not trip the tripwire" \
+    || fail "realistic PKGBUILD falsely rejected: $(cat "$WORK/out")"
+
+# 50. a PKGBUILD that cannot be fetched is an ERROR, never a pass
+srcinfo nopkgbuild "https://example.invalid/n.tar.gz"
+rpc nopkgbuild 1
+rm -f "$WORK/pkgbuild/nopkgbuild.PKGBUILD"
+rc=$(check nopkgbuild)
+if [[ $rc == 1 ]] && grep -q 'cannot fetch the PKGBUILD' "$WORK/out"; then
+    pass "an unfetchable PKGBUILD is an ERROR, never a silent pass"
+else
+    fail "unfetchable PKGBUILD did not surface as an error (rc=$rc)"
 fi
 
 echo ""

@@ -1,14 +1,14 @@
 #!/bin/bash
 # aurupdate — yay -Sua with pin-check on packages about to be upgraded.
 #
-# Runs aur-pin-check against every AUR package that has a pending upgrade.
-# If any fail, aborts — protects against a malicious or mistaken AUR
-# maintainer adding an unpinned git source on upgrade.
+# Runs aur-pin-check against every AUR package that has a pending upgrade,
+# and every AUR dependency those upgrades would pull in. If any fail, aborts:
+# a maintainer adding an unpinned VCS source on upgrade is stopped here, and so
+# is a .SRCINFO that hides one from its PKGBUILD.
 #
-# Per-package PKGBUILD diff / cleanbuild menus are suppressed via
-# ~/.config/yay/config.json (diffmenu=false, cleanmenu=false), so yay
-# only shows its final transaction summary. aur-pin-check is the
-# upgrade gate.
+# A pin is not a review. A hostile maintainer can do anything in build(), so
+# the suite's ~/.config/yay/config.json keeps yay's PKGBUILD diff menu ON
+# (diffmenu=true): read what changed before it builds.
 
 set -uo pipefail
 
@@ -20,10 +20,10 @@ if (( ${#upgrades[@]} == 0 )); then
 fi
 
 echo "[aurupdate] pin-checking ${#upgrades[@]} pending AUR upgrade(s)..." >&2
-if ! aur-pin-check "${upgrades[@]}"; then
+if ! aur-pin-check --deps "${upgrades[@]}"; then
     echo "" >&2
-    echo "[aurupdate] aborting — upgrade set contains unpinned VCS sources." >&2
-    echo "[aurupdate] override: yay -Sua" >&2
+    echo "[aurupdate] aborting — the pin check refused a pending upgrade or one of its AUR dependencies." >&2
+    echo "[aurupdate] override, once you have read the PKGBUILDs: yay -Sua" >&2
     exit 1
 fi
 
