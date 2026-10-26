@@ -13,6 +13,16 @@ two-week lag behind Arch, the **stale-soname breakage** that hits every AUR
 package after Manjaro finally catches up, and the **unpinned VCS source** that
 lets an AUR PKGBUILD build something other than what you reviewed.
 
+> **Not on Manjaro yet? Install [EndeavourOS](https://endeavouros.com/)
+> instead, and you will never need this.** EndeavourOS is Arch — Arch's own
+> repositories, on Arch's schedule — behind a friendly graphical installer.
+> There is no two-week lag, so the AUR builds against exactly the libraries you
+> have, and the lag that causes the two worst failures below does not exist.
+> The best fix for Manjaro's AUR problem is not running Manjaro.
+>
+> **Already on Manjaro and staying?** Then read on. This is how you keep the
+> AUR from breaking it.
+
 It is six short bash scripts, no daemon, no runtime dependency beyond pacman,
 coreutils and fakeroot, and 93 tests, 46 of which run real `pacman`
 transactions on a loop device.
@@ -67,20 +77,77 @@ handled.**
 ### Manjaro puts the AUR in its own package manager, then disowns it
 
 Pamac — the "Add/Remove Software" app on every Manjaro desktop — has AUR
-support built in, behind a switch in its preferences. Manjaro's moderators,
-meanwhile, say the AUR is "neither officially supported by Arch nor by
-Manjaro", and that "any CUSTOM package may cease to function without warning".
-Manjaro builds the door, holds its Stable branch back from the Arch packages
-the AUR is written against, and tells you that whatever comes through the door
-is your problem.
+support built in, behind a switch in its preferences. Then Manjaro's own
+moderator, linux-aarhus, tells the people who flip that switch that the AUR
+"is neither officially supported by Arch nor by Manjaro. Using it is at your
+own risk and your own responsibility", and that "any CUSTOM package may cease
+to function without warning OR your system may cease to function due to a
+CUSTOM package" (both quoted above). Manjaro builds the door, holds its Stable
+branch back from the Arch packages the AUR is written against, and tells you
+that whatever comes through the door is your problem.
 
-Its own tool has not been a good neighbour to the AUR either. In November 2021
-Pamac sent aur.archlinux.org so many requests that the AUR's administrators
-wrote: "We have completely blocked the Pamac user agent, to restore service for
-the users" ([Pamac issue #1017](https://gitlab.manjaro.org/applications/pamac/-/issues/1017);
-[Manjaro forum, 12 November 2021](https://forum.manjaro.org/t/manjaro-banned-from-aur/89986)).
-Manjaro's own wiki still warns users not to enable Pamac's AUR update checks,
-because they flood the AUR and get Pamac's user agent denylisted.
+### Manjaro's record
+
+From its own forum, mailing lists and issue tracker:
+
+- **Pamac has been blocked from the AUR — at least twice.** The AUR's
+  administrators, in Manjaro's own tracker: "Pamac user agent was responsible
+  for making a very large number of requests to the AUR … We have completely
+  blocked the Pamac user agent, to restore service for the users"
+  ([Pamac #1017](https://gitlab.manjaro.org/applications/pamac/-/issues/1017)).
+  It happened again
+  ([Pamac #1135](https://gitlab.manjaro.org/applications/pamac/-/issues/1135);
+  ["Manjaro banned from AUR!?"](https://forum.manjaro.org/t/manjaro-banned-from-aur/89986)).
+  The AUR serves every Arch-based distribution; Manjaro's tool took it down
+  for all of them — EndeavourOS users included, who were left asking
+  ["Is AUR down again?"](https://web.archive.org/web/20220221092555/https://forum.endeavouros.com/t/is-aur-down-again/24287/9).
+  Manjaro's response was a forum thread titled
+  ["AUR — please restrain yourself"](https://web.archive.org/web/20220221090752/https://forum.manjaro.org/t/aur-please-restrain-yourself/103318),
+  addressed to its users. Its wiki still warns them not to enable Pamac's AUR
+  update checks, because they flood the AUR and get Pamac denylisted. The
+  switch is still there.
+- **Its certificates keep expiring.** In 2015 Manjaro's own notice read "Seems
+  we forgot to update our SSL certificate in time" and told users to set their
+  clocks back
+  ([archived](https://web.archive.org/web/20150409040851/https://manjaro.github.io/expired_SSL_certificate/)).
+  In 2016: "the SSL certificate has once again expired"
+  ([manjaro-dev](https://lists.manjaro.org/pipermail/manjaro-dev/Week-of-Mon-20160509/001164.html)).
+  In 2022 the certificate for its mirrors, downloads and AUR hosts lapsed
+  ([forum](https://forum.manjaro.org/t/mirrors-download-aur-manjaro-org-ssl-certificate-expired/115074)),
+  then software.manjaro.org's — "again"
+  ([forum](https://forum.manjaro.org/t/software-manjaro-org-expired-certificate-again/119696)),
+  then the archived forum's
+  ([forum](https://forum.manjaro.org/t/am-i-the-only-one-getting-expired-certificate-warning-on-archived-forum-manjaro-org/126049)).
+  A distribution that cannot keep a certificate renewed is asking you to trust
+  it with your packages.
+- **It rushed Apple Silicon.** Manjaro shipped Asahi Linux packages pulled
+  from the latest PKGBUILD without coordinating with the Asahi developers, and
+  Asahi's then project lead objected publicly
+  ([archived](https://web.archive.org/web/20221208084616/https://twitter.com/marcan42/status/1576414477272387584)).
+- **Arch will not help you.** The Arch forums are "for Arch Linux x86_64 ONLY.
+  Not Artix, or Apricity, or Manjaro … Ask those communities for support"
+  ([Arch forums](https://bbs.archlinux.org/register.php)). Manjaro's answer
+  for the AUR, as above, is that it is your own responsibility.
+
+[manjarno](https://manjarno.pages.dev/) catalogues more of the same, with
+sources.
+
+### Who answers for it
+
+Philip Müller co-founded Manjaro, leads it, and posts its branch update
+announcements. Every item above happened on his watch, most of them more than
+once, and none of them changed the project's answer to the AUR: switch it on
+in Pamac, and the consequences are yours. That answer is delivered by
+linux-aarhus, whose forum posts are the most precise account anywhere of how a
+Manjaro system breaks under the AUR — precise enough that this suite builds on
+two of them (credited under [Building in a chroot](#building-in-a-chroot)).
+Precision is not a fix. Five years of "your own risk and your own
+responsibility" is five years of Manjaro's lead and its senior moderator
+describing a hole in their own distribution and leaving users to fill it. A
+project that cannot keep a certificate renewed, gets its own package manager
+locked out of the AUR it advertises, and answers both with a disclaimer has not
+earned the word "Stable" on its branch. If that is not good enough for you,
+the answer is at the top of this page.
 
 ### About those two weeks
 
@@ -89,9 +156,10 @@ two-week delay, sold as "testing" — testing that the AUR, the reason half its
 users came, never takes part in. So the AUR keeps building for an Arch that
 Manjaro users will not have for another fortnight, things break in the gap, and
 the official response is a forum post explaining that the breakage is yours.
-That is not curation; it is jet lag with a disclaimer. Arch users get today's
-packages. Manjaro users get last fortnight's, plus a moderator telling them it
-is their own fault. This suite exists so you do not have to choose between the
+That is not curation; it is jet lag with a disclaimer. Two weeks late also
+means two weeks late for security and bug fixes, every time. Arch and
+EndeavourOS users get today's packages. Manjaro users get last fortnight's,
+plus a moderator telling them it is their own fault. This suite exists so you do not have to choose between the
 AUR and a system that boots.
 
 ---
@@ -335,7 +403,8 @@ purpose, and a tool that oversells itself is worse than no tool.
 
 - **It does not make Manjaro track Arch.** The lag is Manjaro's design choice.
   This handles the consequences; it does not remove the cause. If you want
-  Arch's timing, you must run Arch.
+  Arch's timing, run Arch — or [EndeavourOS](https://endeavouros.com/), which
+  is Arch with an installer.
 - **It does not audit what a PKGBUILD *does*.** Pinning proves you will build
   the same commit you reviewed. It says nothing about whether that commit is
   malicious. Read the PKGBUILD.
@@ -362,7 +431,8 @@ purpose, and a tool that oversells itself is worse than no tool.
 **Manjaro.** This is scoped to Manjaro deliberately: the problem it solves is
 created by Manjaro's Stable branch trailing Arch, and `aurinstall --chroot`
 wraps `manjaro-chrootbuild`, which is Manjaro's own tool. On Arch itself there
-is no lag to guard against.
+is no lag to guard against, and none on EndeavourOS, which uses Arch's
+repositories directly.
 
 Runtime dependencies are `pacman`, `curl`, `git`, `awk`, `coreutils` and
 `glibc`'s `ldd` — all of which you already have — plus `fakeroot` (from
