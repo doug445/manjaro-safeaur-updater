@@ -131,7 +131,7 @@ From its own forum, mailing lists and issue tracker:
   for the AUR, as above, is that it is your own responsibility.
 
 [manjarno](https://manjarno.pages.dev/) catalogues more of the same, with
-sources.
+sources and a total time elapsed since last self-inflected mismanagement count-up clock.
 
 ### Who answers for it
 
@@ -148,14 +148,9 @@ describing a hole in their own distribution and leaving users to fill it. A
 project that cannot keep a certificate renewed, gets its own package manager
 locked out of the AUR it advertises, and answers both with a disclaimer has not
 earned the word "Stable" on its branch. If that is not good enough for you,
-the answer is at the top of this page.
+the answer is at the top of this page. 
 
-**To linux-aarhus:** two of this suite's best ideas are yours — the chroot
-build and the `-n` chain — and they are credited as yours. Our private
-exchange went badly, and I would rather fix that than keep score. If you are
-willing, send me a direct message — privately, not in a forum thread, and
-from you, not through anyone else. And if anything on this page is wrong, tell
-me and I will correct it.
+
 
 ### About those two weeks
 
