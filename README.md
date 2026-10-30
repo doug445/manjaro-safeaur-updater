@@ -131,7 +131,7 @@ From its own forum, mailing lists and issue tracker:
   for the AUR, as above, is that it is your own responsibility.
 
 [manjarno](https://manjarno.pages.dev/) catalogues more of the same, with
-sources and a total time elapsed since last self-inflected mismanagement count-up clock.
+sources and a total time elapsed since last self-inflicted mismanagement count-up clock.
 
 ### Who answers for it
 
